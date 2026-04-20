@@ -41,13 +41,13 @@ uvicorn agent_cv.main:app --reload --app-dir src
 6. Ingest files:
 
 ```bash
-curl -X POST http://localhost:8000/admin/ingest -H "Content-Type: application/json" -d "{\"max_files\":200}"
+Invoke-RestMethod -Method POST -Uri http://localhost:8000/admin/ingest -ContentType "application/json" -Body (@{ max_files = 200 } | ConvertTo-Json -Compress)
 ```
 
 7. Query:
 
 ```bash
-curl -X POST http://localhost:8000/query -H "Content-Type: application/json" -d "{\"query\":\"show me all expired certifications\",\"language\":\"en\"}"
+Invoke-RestMethod -Method POST -Uri http://localhost:8000/query -ContentType "application/json; charset=utf-8" -Body (@{ query = "Quem tem certificações para armazenamento em nuvem?"; language = "pt" } | ConvertTo-Json -Compress)
 ```
 
 ## Notes

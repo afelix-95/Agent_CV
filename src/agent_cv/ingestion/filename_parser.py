@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 from dateutil import parser as date_parser
@@ -44,8 +44,8 @@ def _extract_dates(text: str) -> tuple[date | None, date | None]:
     parsed: list[date] = []
     for value in matches:
         try:
-            dt = date_parser.parse(value, dayfirst=True, default=date(2000, 1, 1))
-            parsed.append(dt.date())
+            dt = date_parser.parse(value, dayfirst=True, default=datetime(2000, 1, 1))
+            parsed.append(dt.date() if hasattr(dt, "date") and callable(dt.date) else dt)
         except (ValueError, OverflowError):
             continue
     if not parsed:

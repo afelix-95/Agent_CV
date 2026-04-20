@@ -7,6 +7,7 @@ from pypdf import PdfReader
 
 from agent_cv.config import settings
 from agent_cv.db.connection import get_connection
+from agent_cv.ingestion.embedding_service import chunk_text, embed_texts
 from agent_cv.ingestion.filename_parser import parse_file_name
 
 
@@ -108,6 +109,7 @@ def ingest_documents(max_files: int = 100) -> dict[str, int]:
                         """,
                         (employee_id, document_version_id, "summary", text[:10000], "pt"),
                     )
+                    _store_cv_chunks(cur, employee_id, document_version_id, text)
                 else:
                     cur.execute(
                         """
@@ -128,6 +130,13 @@ def ingest_documents(max_files: int = 100) -> dict[str, int]:
                         ),
                     )
 
+                    cur.execute(
+                        "select certification_id from certifications where document_version_id = %s",
+                        (document_version_id,),
+                    )
+                    cert_row = cur.fetchone()
+                    certification_id = cert_row["certification_id"] if cert_row else None
+
                     if parsed.vendor:
                         cur.execute(
                             "insert into vendors (vendor_name) values (%s) on conflict (vendor_name) do nothing",
@@ -143,10 +152,62 @@ def ingest_documents(max_files: int = 100) -> dict[str, int]:
                             (document_version_id, parsed.vendor),
                         )
 
+                    if certification_id and text:
+                        _store_cert_chunks(cur, certification_id, document_version_id, text)
+
                 inserted += 1
         conn.commit()
 
     return {"inserted": inserted, "skipped": skipped, "scanned": len(files)}
+
+
+def _store_cv_chunks(cur, employee_id: str, document_version_id: str, text: str) -> None:
+    chunks = chunk_text(text)
+    if not chunks:
+        return
+    embeddings = embed_texts(chunks)
+    for order, (chunk, vector) in enumerate(zip(chunks, embeddings)):
+        cur.execute(
+            """
+            insert into cv_chunks (
+                employee_id, document_version_id, chunk_text, chunk_order,
+                token_count, embedding, language_code
+            ) values (%s, %s, %s, %s, %s, %s::vector, %s)
+            """,
+            (
+                employee_id,
+                document_version_id,
+                chunk,
+                order,
+                len(chunk) // 4,
+                str(vector),
+                "pt",
+            ),
+        )
+
+
+def _store_cert_chunks(cur, certification_id: str, document_version_id: str, text: str) -> None:
+    chunks = chunk_text(text)
+    if not chunks:
+        return
+    embeddings = embed_texts(chunks)
+    for chunk, vector in zip(chunks, embeddings):
+        cur.execute(
+            """
+            insert into certification_chunks (
+                certification_id, document_version_id, chunk_text,
+                token_count, embedding, language_code
+            ) values (%s, %s, %s, %s, %s::vector, %s)
+            """,
+            (
+                certification_id,
+                document_version_id,
+                chunk,
+                len(chunk) // 4,
+                str(vector),
+                "pt",
+            ),
+        )
 
 
 def _compute_status(expiry_date):

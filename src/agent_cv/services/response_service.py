@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
+from agent_cv.services.query_service import normalize_text
+
 
 def build_summary(query: str, rows: Sequence[dict], language: str | None) -> tuple[str, str]:
     lang = (language or _guess_lang(query)).lower()
@@ -14,7 +16,7 @@ def build_summary(query: str, rows: Sequence[dict], language: str | None) -> tup
 
 
 def _guess_lang(text: str) -> str:
-    lowered = text.lower()
+    lowered = normalize_text(text)
     if any(token in lowered for token in ["quem", "mostrar", "certificacoes", "expirad"]):
         return "pt"
     return "en"
