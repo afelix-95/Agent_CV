@@ -1,10 +1,17 @@
 import time
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Query
 
-from agent_cv.api.models import IngestRequest, QueryRequest, QueryResponse, CertificationHit
+from agent_cv.api.models import (
+    AuditLogsResponse,
+    CertificationHit,
+    IngestRequest,
+    QueryRequest,
+    QueryResponse,
+)
 from agent_cv.db.schema import apply_schema
 from agent_cv.ingestion.ingest_service import ingest_documents
+from agent_cv.db.connection import get_connection
 from agent_cv.services.query_service import audit_query, infer_intent, run_query
 from agent_cv.services.response_service import build_summary
 
@@ -24,7 +31,43 @@ def init_db() -> dict[str, str]:
 
 @router.post("/admin/ingest")
 def ingest(request: IngestRequest) -> dict[str, int]:
-    return ingest_documents(max_files=request.max_files)
+    return ingest_documents(
+        max_files=request.max_files,
+        force_reingest=request.force_reingest,
+        filename_contains=request.filename_contains,
+    )
+
+
+@router.get("/admin/query-audit/recent", response_model=AuditLogsResponse)
+def audit_logs_recent(limit: int = Query(50, ge=1, le=500)) -> AuditLogsResponse:
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("select count(*) as total from query_audit")
+            total_row = cur.fetchone()
+            total = total_row["total"] if total_row else 0
+
+            cur.execute(
+                """
+                select
+                    query_text,
+                    query_language,
+                    response_language,
+                    result_count,
+                    latency_ms,
+                    normalized_intent_json,
+                    created_at
+                from query_audit
+                order by created_at desc
+                limit %s
+                """,
+                (limit,),
+            )
+            rows = cur.fetchall()
+
+    return AuditLogsResponse(
+        total=total,
+        entries=[dict(row) for row in rows],
+    )
 
 
 @router.post("/query", response_model=QueryResponse)
