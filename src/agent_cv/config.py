@@ -18,6 +18,7 @@ class Settings(BaseSettings):
 
     teams_bot_app_id: str = ""
     teams_bot_app_password: str = ""
+    teams_bot_tenant_id: str = ""
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 

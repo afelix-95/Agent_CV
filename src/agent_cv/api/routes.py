@@ -1,10 +1,11 @@
 import time
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, HTTPException, Query, Request, Response, status
 
 from agent_cv.api.models import (
     AuditLogsResponse,
     CertificationHit,
+    ExperienceHit,
     IngestRequest,
     QueryRequest,
     QueryResponse,
@@ -13,7 +14,13 @@ from agent_cv.db.schema import apply_schema
 from agent_cv.ingestion.ingest_service import ingest_documents
 from agent_cv.db.connection import get_connection
 from agent_cv.services.query_service import audit_query, infer_intent, run_query
-from agent_cv.services.response_service import build_summary
+from agent_cv.services.agent_service import handle_user_query
+from agent_cv.teams.agent import get_teams_agent_runtime, teams_setup_issue
+
+try:
+    from microsoft_agents.hosting.fastapi import start_agent_process
+except ImportError:  # pragma: no cover - SDK installed separately from app code
+    start_agent_process = None
 
 router = APIRouter()
 
@@ -73,49 +80,67 @@ def audit_logs_recent(limit: int = Query(50, ge=1, le=500)) -> AuditLogsResponse
 @router.post("/query", response_model=QueryResponse)
 def query(request: QueryRequest) -> QueryResponse:
     started = time.perf_counter()
-    rows = run_query(request.query)
-    summary, language = build_summary(request.query, rows, request.language)
+    agent_result = handle_user_query(
+        request.query,
+        request.language,
+        request.conversation_id,
+    )
     _safe_audit(
         query_text=request.query,
         query_language=request.language,
-        response_language=language,
-        result_count=len(rows),
+        response_language=agent_result.language,
+        result_count=agent_result.total_results,
         latency_ms=int((time.perf_counter() - started) * 1000),
     )
+
+    certifications = []
+    experiences = []
+    if agent_result.analysis.query_type == "certifications":
+        certifications = [CertificationHit(**row) for row in agent_result.rows_page]
+    elif agent_result.analysis.query_type == "experience":
+        experiences = [ExperienceHit(**row) for row in agent_result.rows_page]
+
     return QueryResponse(
-        language=language,
-        summary=summary,
-        certifications=[CertificationHit(**row) for row in rows],
+        intent=agent_result.analysis.query_type,
+        language=agent_result.language,
+        answer=agent_result.answer,
+        summary=agent_result.summary,
+        total_results=agent_result.total_results,
+        shown_results=agent_result.shown_results,
+        has_more=agent_result.has_more,
+        show_certification_details=agent_result.show_certification_details,
+        certifications=certifications,
+        experiences=experiences,
     )
 
 
+@router.get("/api/messages")
+@router.get("/teams/messages")
+def teams_messages_health() -> dict[str, str]:
+    issue = teams_setup_issue()
+    if issue:
+        return {"status": "not-configured", "detail": issue}
+    return {"status": "ok", "detail": "Teams agent endpoint is ready."}
+
+
+@router.post("/api/messages")
 @router.post("/teams/messages")
-def teams_message(payload: dict) -> dict:
-    text = (payload.get("text") or "").strip()
-    if not text:
-        return {"type": "message", "text": "Please provide a query."}
+async def teams_message(request: Request) -> Response:
+    issue = teams_setup_issue()
+    if issue:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=issue,
+        )
+    if start_agent_process is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Microsoft 365 Agents SDK FastAPI host is not installed.",
+        )
 
-    started = time.perf_counter()
-    rows = run_query(text)
-    summary, language = build_summary(text, rows, None)
-    _safe_audit(
-        query_text=text,
-        query_language=None,
-        response_language=language,
-        result_count=len(rows),
-        latency_ms=int((time.perf_counter() - started) * 1000),
-    )
-
-    if language == "pt":
-        message = summary
-    else:
-        message = summary
-
-    return {
-        "type": "message",
-        "text": message,
-        "results": rows[:10],
-    }
+    runtime = get_teams_agent_runtime()
+    response = await start_agent_process(request, runtime.agent_app, runtime.adapter)
+    return response or Response(status_code=status.HTTP_202_ACCEPTED)
 
 
 def _safe_audit(

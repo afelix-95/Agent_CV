@@ -13,6 +13,7 @@ class IngestRequest(BaseModel):
 class QueryRequest(BaseModel):
     query: str = Field(min_length=2)
     language: Literal["pt", "en"] | None = None
+    conversation_id: str | None = None
 
 
 class CertificationHit(BaseModel):
@@ -24,10 +25,25 @@ class CertificationHit(BaseModel):
     expiry_date: date | None = None
 
 
-class QueryResponse(BaseModel):
+class ExperienceHit(BaseModel):
+    employee_name: str
+    headline: str
+    snippet: str
+    source_document: str
     language: str
+
+
+class QueryResponse(BaseModel):
+    intent: Literal["certifications", "experience", "chat"]
+    language: str
+    answer: str
     summary: str
-    certifications: list[CertificationHit]
+    total_results: int = 0
+    shown_results: int = 0
+    has_more: bool = False
+    show_certification_details: bool = False
+    certifications: list[CertificationHit] = Field(default_factory=list)
+    experiences: list[ExperienceHit] = Field(default_factory=list)
 
 
 class AuditLogEntry(BaseModel):
