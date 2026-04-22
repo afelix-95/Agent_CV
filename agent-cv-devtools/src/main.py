@@ -33,6 +33,8 @@ async def _query_backend(query_text: str, conversation_id: str | None) -> tuple[
     language = body.get("language", "en")
     summary = body.get("summary")
     answer = body.get("answer")
+    shown_results = int(body.get("shown_results", 0) or 0)
+    total_results = int(body.get("total_results", 0) or 0)
     has_more = bool(body.get("has_more", False))
 
     if not summary and not answer:
@@ -45,6 +47,13 @@ async def _query_backend(query_text: str, conversation_id: str | None) -> tuple[
         if lines:
             lines.append("")
         lines.append(answer)
+
+    if total_results > 0 and shown_results > 0:
+        lines.append("")
+        if language == "pt":
+            lines.append(f"A mostrar {shown_results} de {total_results} resultados.")
+        else:
+            lines.append(f"Showing {shown_results} of {total_results} results.")
 
     if has_more:
         lines.append("")

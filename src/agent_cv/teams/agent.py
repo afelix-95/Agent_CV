@@ -140,7 +140,16 @@ def _register_handlers(agent_app: Any) -> None:
             latency_ms=int((time.perf_counter() - started) * 1000),
             teams_user_id=_teams_user_id(context),
         )
-        await context.send_activity(_build_teams_reply(result.summary, result.answer, result.language, result.has_more))
+        await context.send_activity(
+            _build_teams_reply(
+                result.summary,
+                result.answer,
+                result.language,
+                result.has_more,
+                result.shown_results,
+                result.total_results,
+            )
+        )
 
     @agent_app.error
     async def on_error(context: TurnContext, error: Exception) -> None:
@@ -174,7 +183,14 @@ def _set_if_missing(env: dict[str, str], key: str, value: str) -> None:
         env[key] = value
 
 
-def _build_teams_reply(summary: str, answer: str, language: str, has_more: bool) -> str:
+def _build_teams_reply(
+    summary: str,
+    answer: str,
+    language: str,
+    has_more: bool,
+    shown_results: int,
+    total_results: int,
+) -> str:
     lines: list[str] = []
     if summary:
         lines.append(summary)
@@ -182,6 +198,13 @@ def _build_teams_reply(summary: str, answer: str, language: str, has_more: bool)
         if lines:
             lines.append("")
         lines.append(answer)
+    if total_results > 0 and shown_results > 0:
+        lines.extend(
+            [
+                "",
+                f"A mostrar {shown_results} de {total_results} resultados." if language == "pt" else f"Showing {shown_results} of {total_results} results.",
+            ]
+        )
     if has_more:
         lines.extend([
             "",

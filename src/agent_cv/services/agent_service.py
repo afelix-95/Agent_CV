@@ -27,7 +27,7 @@ FOLLOW_UP_MORE_MARKERS = {
     "continue",
 }
 
-PAGE_SIZE = 5
+PAGE_SIZE = 10
 NAMES_PAGE_SIZE = 10
 WEB_SEARCH_MARKERS = {
     "search the web",
@@ -334,15 +334,7 @@ def _build_more_details_answer(rows: list[dict], language: str) -> str:
     if not rows:
         return "Não há mais certificações para mostrar." if language == "pt" else "There are no more certifications to show."
 
-    if language == "pt":
-        lines = ["Mais certificações encontradas:"]
-        for row in rows:
-            lines.append(
-                f"- {row.get('employee_name', 'Colaborador')} | {row.get('certification_name', 'Certificação')} | {row.get('vendor', 'Fornecedor')} | {row.get('status', 'desconhecido')}"
-            )
-        return "\n".join(lines)
-
-    lines = ["More certification matches:"]
+    lines: list[str] = []
     for row in rows:
         lines.append(
             f"- {row.get('employee_name', 'Employee')} | {row.get('certification_name', 'Certification')} | {row.get('vendor', 'Vendor')} | {row.get('status', 'unknown')}"
@@ -354,20 +346,11 @@ def _build_more_names_answer(names: list[str], intent: str, language: str) -> st
     if not names:
         return "Não há mais resultados para mostrar." if language == "pt" else "There are no more results to show."
 
-    if language == "pt":
-        if intent == "experience":
-            return "Mais colaboradores relevantes:\n- " + "\n- ".join(names)
-        return "Mais colaboradores encontrados:\n- " + "\n- ".join(names)
-
-    if intent == "experience":
-        return "More relevant employees:\n- " + "\n- ".join(names)
-    return "More employees found:\n- " + "\n- ".join(names)
+    return "- " + "\n- ".join(names)
 
 
 def _more_summary(language: str, shown: int, total: int) -> str:
-    if language == "pt":
-        return f"A mostrar {shown} de {total} resultados acumulados."
-    return f"Showing {shown} of {total} accumulated results."
+    return ""
 
 
 def _build_web_answer(hits: list[str], language: str) -> str:
