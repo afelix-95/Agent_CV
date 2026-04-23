@@ -117,6 +117,24 @@ def graph_setup_issue() -> str | None:
 
 
 @lru_cache(maxsize=1)
+def _get_credential() -> _RopcCredential:
+    """Return the cached ROPC credential for the bot service account."""
+    issue = graph_setup_issue()
+    if issue:
+        raise RuntimeError(issue)
+
+    scopes = settings.graph_scopes.split() if settings.graph_scopes else _DEFAULT_SCOPES
+    return _RopcCredential(
+        tenant_id=settings.teams_bot_tenant_id,
+        client_id=settings.teams_bot_app_id,
+        client_secret=settings.teams_bot_app_password,
+        username=settings.graph_user_email,
+        password=settings.graph_user_password,
+        scopes=scopes,
+    )
+
+
+@lru_cache(maxsize=1)
 def get_graph_client() -> GraphServiceClient:
     """Return a cached Microsoft Graph client authenticated via delegated ROPC flow.
 
@@ -128,18 +146,15 @@ def get_graph_client() -> GraphServiceClient:
 
     Raises RuntimeError if Graph settings are incomplete.
     """
-    issue = graph_setup_issue()
-    if issue:
-        raise RuntimeError(issue)
-
+    credential = _get_credential()
     scopes = settings.graph_scopes.split() if settings.graph_scopes else _DEFAULT_SCOPES
-
-    credential = _RopcCredential(
-        tenant_id=settings.teams_bot_tenant_id,
-        client_id=settings.teams_bot_app_id,
-        client_secret=settings.teams_bot_app_password,
-        username=settings.graph_user_email,
-        password=settings.graph_user_password,
-        scopes=scopes,
-    )
     return GraphServiceClient(credentials=credential, scopes=scopes)
+
+
+def get_access_token() -> str:
+    """Return a raw Bearer access token for the configured ROPC service account.
+
+    Uses the cached MSAL token (with silent refresh) so repeated calls are cheap.
+    """
+    token = _get_credential().get_token("https://graph.microsoft.com/.default")
+    return token.token

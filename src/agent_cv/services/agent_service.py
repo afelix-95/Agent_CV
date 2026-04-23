@@ -154,6 +154,7 @@ HOW TO RESPOND:
 7. Be specific: list names and certification titles when found; avoid unnecessary hedging
 8. End your reply with 1-2 relevant follow-up suggestions the user might find useful
 9. If tools return no data, say clearly what you searched for and suggest alternatives
+10. ALWAYS write exclusively in Latin script — never output characters from Georgian, Arabic, Cyrillic, Greek, or any other non-Latin alphabet, even as abbreviations or parenthetical notes
 """
 
 _SYSTEM_PROMPT_PT = """\
@@ -178,6 +179,7 @@ COMO RESPONDER:
 7. Sê específico: lista nomes e títulos de certificações quando encontrados; não sejas desnecessariamente cauteloso
 8. Termina a resposta com 1-2 sugestões de perguntas de seguimento relevantes
 9. Se as ferramentas não retornarem dados, diz claramente o que pesquisaste e sugere alternativas
+10. Escreve SEMPRE exclusivamente em alfabeto latino — nunca uses caracteres do alfabeto georgiano, árabe, cirílico, grego ou qualquer outro alfabeto não-latino, mesmo em abreviaturas ou notas
 """
 
 

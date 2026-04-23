@@ -14,6 +14,7 @@ in requirements.txt (commented out) in case a webhook approach is needed later.
 from __future__ import annotations
 
 import asyncio
+import html as _html
 import logging
 import re
 import time
@@ -22,7 +23,7 @@ from typing import TYPE_CHECKING
 
 from agent_cv.config import settings
 from agent_cv.services.agent_service import handle_user_query
-from agent_cv.services.graph_service import get_graph_client
+from agent_cv.services.graph_service import get_access_token, get_graph_client
 from agent_cv.services.query_service import audit_query
 
 if TYPE_CHECKING:
@@ -31,6 +32,8 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _STRIP_HTML = re.compile(r"<[^>]+>")
+# Re-set Teams presence before the 1-hour session expires (every 55 minutes)
+_PRESENCE_REFRESH_INTERVAL: int = 3300
 
 
 class GraphPollingBot:
@@ -48,6 +51,8 @@ class GraphPollingBot:
         # chat_id -> set of already-processed message IDs (within this run)
         self._seen: dict[str, set[str]] = {}
         self._bot_user_id: str | None = None
+        # Tracks when presence was last refreshed (monotonic seconds)
+        self._last_presence_set: float = 0.0
 
     # ------------------------------------------------------------------ #
     # Lifecycle                                                            #
@@ -101,10 +106,56 @@ class GraphPollingBot:
             self._bot_user_id = me.id
             logger.debug("Graph bot resolved user ID: %s", self._bot_user_id)
 
+        # Keep the service account's Teams presence as Available
+        now = time.monotonic()
+        if now - self._last_presence_set >= _PRESENCE_REFRESH_INTERVAL:
+            await self._set_presence_available()
+            self._last_presence_set = now
+
         chats_page = await client.me.chats.get()
         for chat in chats_page.value or []:
             if chat.id:
                 await self._process_chat(client, chat.id)
+
+    async def _set_presence_available(self) -> None:
+        """Set the bot service account's Teams presence to Available.
+
+        Uses the Graph REST API directly with a Bearer token because the Graph SDK
+        does not expose a simple wrapper for the setPresence endpoint.
+
+        Requires the Entra app registration to have the delegated permission
+        ``Presence.ReadWrite`` consented by the tenant admin.
+        """
+        import httpx
+
+        try:
+            token = await asyncio.to_thread(get_access_token)
+            async with httpx.AsyncClient(timeout=10.0) as http:
+                resp = await http.post(
+                    "https://graph.microsoft.com/v1.0/me/presence/setPresence",
+                    headers={
+                        "Authorization": f"Bearer {token}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "sessionId": settings.teams_bot_app_id,
+                        "availability": "Available",
+                        "activity": "Available",
+                        "expirationDuration": "PT1H",
+                    },
+                )
+            if resp.status_code in (200, 204):
+                logger.info("Graph bot: Teams presence set to Available")
+            else:
+                logger.warning(
+                    "Graph bot: setPresence returned HTTP %s — "
+                    "ensure Presence.ReadWrite is consented for app %s. Response: %s",
+                    resp.status_code,
+                    settings.teams_bot_app_id,
+                    resp.text[:200],
+                )
+        except Exception:
+            logger.exception("Graph bot: failed to set Teams presence")
 
     async def _process_chat(
         self, client: "GraphServiceClient", chat_id: str
@@ -218,7 +269,11 @@ class GraphPollingBot:
             )
 
         try:
-            reply = ChatMessage(body=ItemBody(content=reply_text))
+            from msgraph.generated.models.body_type import BodyType
+            reply = ChatMessage(body=ItemBody(
+                content=_text_to_html(reply_text),
+                content_type=BodyType.Html,
+            ))
             await client.chats.by_chat_id(chat_id).messages.post(reply)
         except Exception:
             logger.exception(
@@ -243,6 +298,32 @@ def get_graph_bot() -> GraphPollingBot:
 # ------------------------------------------------------------------ #
 # Helpers                                                             #
 # ------------------------------------------------------------------ #
+
+def _text_to_html(text: str) -> str:
+    """Convert LLM plain-text output (• bullets + newlines) to Teams-compatible HTML."""
+    lines = text.split("\n")
+    parts: list[str] = []
+    in_list = False
+
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("•"):
+            if not in_list:
+                parts.append("<ul>")
+                in_list = True
+            parts.append(f"<li>{_html.escape(stripped[1:].strip())}</li>")
+        else:
+            if in_list:
+                parts.append("</ul>")
+                in_list = False
+            if stripped:
+                parts.append(f"<p>{_html.escape(stripped)}</p>")
+
+    if in_list:
+        parts.append("</ul>")
+
+    return "".join(parts)
+
 
 def _build_reply(result: object) -> str:
     lines: list[str] = []
