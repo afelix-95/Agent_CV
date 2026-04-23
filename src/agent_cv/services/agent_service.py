@@ -450,11 +450,9 @@ def _tool_chat_completion(
         if language == "pt":
             return (
                 "Olá. Posso ajudar com perguntas sobre certificações e experiência profissional. "
-                "Também consigo continuar resultados anteriores se pedir 'mostrar mais resultados'."
             )
         return (
             "Hello. I can help with certification and professional experience questions. "
-            "I can also continue previous result lists if you ask 'show more results'."
         )
 
     if any(token in norm for token in {"obrigado", "obrigada", "thanks", "thank you"}):

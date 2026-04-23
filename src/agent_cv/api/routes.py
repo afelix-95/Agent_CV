@@ -1,6 +1,6 @@
 import time
 
-from fastapi import APIRouter, HTTPException, Query, Request, Response, status
+from fastapi import APIRouter, Query
 
 from agent_cv.api.models import (
     AuditLogsResponse,
@@ -15,12 +15,9 @@ from agent_cv.ingestion.ingest_service import ingest_documents
 from agent_cv.db.connection import get_connection
 from agent_cv.services.query_service import audit_query, infer_intent, run_query
 from agent_cv.services.agent_service import handle_user_query
-from agent_cv.teams.agent import get_teams_agent_runtime, teams_setup_issue
-
-try:
-    from microsoft_agents.hosting.fastapi import start_agent_process
-except ImportError:  # pragma: no cover - SDK installed separately from app code
-    start_agent_process = None
+from agent_cv.config import settings
+from agent_cv.services.graph_service import graph_setup_issue
+from agent_cv.teams.agent import get_graph_bot
 
 router = APIRouter()
 
@@ -56,6 +53,8 @@ def audit_logs_recent(limit: int = Query(50, ge=1, le=500)) -> AuditLogsResponse
             cur.execute(
                 """
                 select
+                    aad_object_id,
+                    chat_id,
                     query_text,
                     query_language,
                     response_language,
@@ -114,33 +113,16 @@ def query(request: QueryRequest) -> QueryResponse:
     )
 
 
-@router.get("/api/messages")
-@router.get("/teams/messages")
-def teams_messages_health() -> dict[str, str]:
-    issue = teams_setup_issue()
+@router.get("/teams/status")
+def teams_status() -> dict[str, str]:
+    issue = graph_setup_issue()
     if issue:
         return {"status": "not-configured", "detail": issue}
-    return {"status": "ok", "detail": "Teams agent endpoint is ready."}
-
-
-@router.post("/api/messages")
-@router.post("/teams/messages")
-async def teams_message(request: Request) -> Response:
-    issue = teams_setup_issue()
-    if issue:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=issue,
-        )
-    if start_agent_process is None:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Microsoft 365 Agents SDK FastAPI host is not installed.",
-        )
-
-    runtime = get_teams_agent_runtime()
-    response = await start_agent_process(request, runtime.agent_app, runtime.adapter)
-    return response or Response(status_code=status.HTTP_202_ACCEPTED)
+    bot = get_graph_bot()
+    return {
+        "status": "running" if bot.running else "stopped",
+        "account": settings.graph_user_email,
+    }
 
 
 def _safe_audit(

@@ -25,6 +25,8 @@ class Settings(BaseSettings):
     graph_user_password: str = ""
     # Space-separated delegated scopes; defaults to all admin-consented permissions
     graph_scopes: str = "https://graph.microsoft.com/.default"
+    # How often (in seconds) the polling bot checks for new messages
+    graph_poll_interval: int = 10
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 

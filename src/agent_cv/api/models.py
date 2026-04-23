@@ -47,6 +47,8 @@ class QueryResponse(BaseModel):
 
 
 class AuditLogEntry(BaseModel):
+    aad_object_id: str | None = None
+    chat_id: str | None = None
     query_text: str
     query_language: str | None = None
     response_language: str

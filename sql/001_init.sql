@@ -127,16 +127,10 @@ create table if not exists teams_users (
     locale text
 );
 
-create table if not exists teams_user_access_scope (
-    teams_user_access_scope_id uuid primary key default gen_random_uuid(),
-    teams_user_id uuid not null references teams_users(teams_user_id) on delete cascade,
-    scope_type text not null,
-    scope_value text not null
-);
-
 create table if not exists query_audit (
     query_audit_id uuid primary key default gen_random_uuid(),
-    teams_user_id uuid references teams_users(teams_user_id) on delete set null,
+    aad_object_id text,
+    chat_id text,
     query_text text not null,
     query_language text,
     normalized_intent_json jsonb,

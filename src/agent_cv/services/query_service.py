@@ -378,24 +378,27 @@ def audit_query(
     result_count: int,
     latency_ms: int,
     normalized_intent: dict | None = None,
-    teams_user_id: str | None = None,
+    aad_object_id: str | None = None,
+    chat_id: str | None = None,
 ) -> None:
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
                 insert into query_audit (
-                    teams_user_id,
+                    aad_object_id,
+                    chat_id,
                     query_text,
                     query_language,
                     normalized_intent_json,
                     response_language,
                     result_count,
                     latency_ms
-                ) values (%s, %s, %s, %s, %s, %s, %s)
+                ) values (%s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
-                    teams_user_id,
+                    aad_object_id,
+                    chat_id,
                     query_text,
                     query_language,
                     Jsonb(normalized_intent or {}),
