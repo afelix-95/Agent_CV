@@ -20,6 +20,12 @@ class Settings(BaseSettings):
     teams_bot_app_password: str = ""
     teams_bot_tenant_id: str = ""
 
+    # Microsoft Graph delegated access (ROPC flow via bot service account)
+    graph_user_email: str = ""
+    graph_user_password: str = ""
+    # Space-separated delegated scopes; defaults to all admin-consented permissions
+    graph_scopes: str = "https://graph.microsoft.com/.default"
+
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 
 
