@@ -1,118 +1,222 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+import json
+import logging
+from dataclasses import dataclass, field
 from functools import lru_cache
 from threading import Lock
-import re
+from typing import Any
 
 import httpx
 from openai import AzureOpenAI
 
 from agent_cv.config import settings
-from agent_cv.services.query_service import QueryAnalysis, run_query
-from agent_cv.services.response_service import build_summary
+from agent_cv.db.connection import get_connection
+from agent_cv.services.query_service import QueryAnalysis, normalize_text
 
+logger = logging.getLogger(__name__)
 
-FOLLOW_UP_MORE_MARKERS = {
-    "show more",
-    "more results",
-    "next results",
-    "next page",
-    "remaining results",
-    "demais resultados",
-    "mais resultados",
-    "proximos resultados",
-    "mostrar mais",
-    "continuar",
-    "continue",
-}
+MAX_AGENT_ITERATIONS = 5
 
-PAGE_SIZE = 10
-NAMES_PAGE_SIZE = 10
-WEB_SEARCH_MARKERS = {
-    "search the web",
-    "web search",
-    "look on the web",
-    "internet search",
-    "pesquise na web",
-    "pesquise na internet",
-    "procure na web",
-    "buscar na internet",
-}
+# ------------------------------------------------------------------ #
+# Tool schema                                                          #
+# ------------------------------------------------------------------ #
 
-GREETING_PATTERNS = [
-    r"^\s*(oi|ola|olá|hello|hi|hey|bom dia|boa tarde|boa noite)\s*!*\s*$",
+TOOLS: list[dict] = [
+    {
+        "type": "function",
+        "function": {
+            "name": "search_certifications",
+            "description": (
+                "Search the employee certifications database by technology, vendor, or keyword. "
+                "Returns employees with matching certifications including name, vendor, status, and dates. "
+                "Use this whenever the user asks who has certifications in a specific area."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Technology, vendor, or certification name (e.g. 'Azure', 'Red Hat', 'CCNA', 'AZ-900')",
+                    },
+                    "employee_name": {
+                        "type": "string",
+                        "description": "Optional: restrict to a specific employee",
+                    },
+                    "status": {
+                        "type": "string",
+                        "enum": ["active", "expired", "any"],
+                        "description": "Filter by certificate status. Default: 'any'.",
+                    },
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_experience",
+            "description": (
+                "Search employee CV documents for work experience, skills, and professional background. "
+                "Returns relevant excerpts. Use this for experience/skill queries, "
+                "or to complement a certification search with evidence from CVs."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Skill, technology, or domain (e.g. 'cybersecurity', 'cloud infrastructure', 'project management')",
+                    },
+                    "employee_name": {
+                        "type": "string",
+                        "description": "Optional: restrict to a specific employee",
+                    },
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_employee_profile",
+            "description": (
+                "Get the full profile for a specific employee, including all certifications and CV summary. "
+                "Use when the user asks about a specific person by name."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "employee_name": {
+                        "type": "string",
+                        "description": "Full or partial name of the employee",
+                    }
+                },
+                "required": ["employee_name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_employees",
+            "description": "Return a list of all employees in the system. Use when the user wants to know who is available.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_web",
+            "description": (
+                "Search the internet for information about certifications, technologies, or vendors. "
+                "Useful to verify whether a technology relates to a domain, or to describe what a certification covers."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Web search query",
+                    }
+                },
+                "required": ["query"],
+            },
+        },
+    },
 ]
 
-CHAT_MARKERS = {
-    "help",
-    "ajuda",
-    "obrigado",
-    "obrigada",
-    "thanks",
-    "thank you",
-    "who are you",
-    "quem es",
-    "quem és",
-    "o que consegues",
-    "o que voce consegue",
-    "o que você consegue",
-    "o que voce pode fazer",
-    "o que você pode fazer",
-    "o que podes fazer",
-    "what do you do",
-    "what can you do",
-}
+# ------------------------------------------------------------------ #
+# System prompts                                                       #
+# ------------------------------------------------------------------ #
 
-DATA_QUERY_HINTS = {
-    "cert",
-    "certific",
-    "expir",
-    "experience",
-    "experiencia",
-    "cv",
-    "curriculum",
-    "colaborador",
-    "employee",
-    "vendor",
-    "fornecedor",
-    "microsoft",
-    "cisco",
-    "red hat",
-    "dell",
-    "aws",
-    "vmware",
-    "oracle",
-}
+_SYSTEM_PROMPT_EN = """\
+You are Agent CV, an intelligent HR assistant for a technology company.
+You have access to a database of employee certifications and CV documents.
+Your job is to help HR managers and team leads find employees with specific skills, certifications, or experience.
+
+TOOLS AVAILABLE:
+• search_certifications — find employee certifications by technology, vendor, or keyword
+• search_experience — search employee CVs for work experience and skills
+• get_employee_profile — retrieve the full profile for a specific employee
+• list_employees — list all employees in the system
+• search_web — look up external information about certifications or technologies
+
+HOW TO RESPOND:
+1. For any data query, use tools FIRST — never answer from memory or make assumptions
+2. If a search returns no results, try alternate keywords (e.g. "AZ-900" for Azure, "RHCE" for Red Hat, "SC-200" for security)
+3. For broad topics like "cybersecurity" or "cloud", search BOTH certifications AND experience
+4. Respond in the SAME LANGUAGE as the user's message
+5. Write in a conversational, helpful tone — like a knowledgeable colleague
+6. Use bullet points (•) to list employees or certifications; avoid markdown bold/italic
+7. Be specific: list names and certification titles when found; avoid unnecessary hedging
+8. End your reply with 1-2 relevant follow-up suggestions the user might find useful
+9. If tools return no data, say clearly what you searched for and suggest alternatives
+"""
+
+_SYSTEM_PROMPT_PT = """\
+És o Agent CV, um assistente de RH inteligente para uma empresa de tecnologia.
+Tens acesso a uma base de dados de certificações e documentos de CV dos colaboradores.
+O teu trabalho é ajudar gestores de RH e líderes de equipa a encontrar colaboradores com competências, certificações ou experiência específicas.
+
+FERRAMENTAS DISPONÍVEIS:
+• search_certifications — encontrar certificações por tecnologia, fornecedor ou palavra-chave
+• search_experience — pesquisar CVs por experiência profissional e competências
+• get_employee_profile — obter o perfil completo de um colaborador específico
+• list_employees — listar todos os colaboradores no sistema
+• search_web — pesquisar informação externa sobre certificações ou tecnologias
+
+COMO RESPONDER:
+1. Para qualquer pergunta sobre dados, usa as ferramentas PRIMEIRO — nunca adivinhes
+2. Se uma pesquisa não tiver resultados, tenta palavras-chave alternativas (ex: "AZ-900" para Azure, "RHCE" para Red Hat, "SC-200" para segurança)
+3. Para tópicos amplos como "cibersegurança" ou "cloud", pesquisa TANTO em certificações COMO em experiência
+4. Responde sempre no MESMO IDIOMA da mensagem do utilizador
+5. Escreve num tom conversacional e útil — como um colega experiente
+6. Usa marcadores (•) para listar colaboradores ou certificações; evita negrito/itálico markdown
+7. Sê específico: lista nomes e títulos de certificações quando encontrados; não sejas desnecessariamente cauteloso
+8. Termina a resposta com 1-2 sugestões de perguntas de seguimento relevantes
+9. Se as ferramentas não retornarem dados, diz claramente o que pesquisaste e sugere alternativas
+"""
+
+
+# ------------------------------------------------------------------ #
+# Public types                                                         #
+# ------------------------------------------------------------------ #
 
 
 @dataclass
 class ConversationState:
-    intent: str
     language: str
-    show_certification_details: bool
-    rows: list[dict]
-    cursor: int
-    names: list[str]
-    names_cursor: int
     history: list[tuple[str, str]]
 
 
 @dataclass(frozen=True)
 class AgentQueryResult:
-    analysis: QueryAnalysis
     language: str
     summary: str
     answer: str
-    rows_page: list[dict]
     total_results: int
     shown_results: int
     has_more: bool
-    show_certification_details: bool
+    analysis: QueryAnalysis
+    rows_page: list[dict] = field(default_factory=list)
+    show_certification_details: bool = False
+    tool_calls_log: list[dict] = field(default_factory=list)
 
+
+# ------------------------------------------------------------------ #
+# In-memory conversation store                                         #
+# ------------------------------------------------------------------ #
 
 _STATE: dict[str, ConversationState] = {}
 _STATE_LOCK = Lock()
+
+
+# ------------------------------------------------------------------ #
+# Entry point                                                          #
+# ------------------------------------------------------------------ #
 
 
 def handle_user_query(
@@ -120,274 +224,393 @@ def handle_user_query(
     preferred_language: str | None,
     conversation_id: str | None,
 ) -> AgentQueryResult:
-    normalized_query = (query_text or "").strip().lower()
     state_key = (conversation_id or "default").strip() or "default"
-
     with _STATE_LOCK:
         prior = _STATE.get(state_key)
 
-    if prior and _is_follow_up_more(normalized_query):
-        result = _continue_from_history(prior)
-        _append_history(state_key, query_text, result.answer)
-        return result
-
-    if _is_conversational_turn(normalized_query):
-        language = preferred_language or (prior.language if prior else _detect_language(normalized_query))
-        answer = _tool_chat_completion(state_key, query_text, language, prior)
-        result = AgentQueryResult(
-            analysis=_chat_analysis(language),
+    language = preferred_language or _detect_language(query_text, prior)
+    client = _get_chat_client()
+    if client is None or not settings.azure_openai_chat_deployment:
+        answer = _no_llm_fallback(language)
+        _save_state(state_key, language, query_text, answer, prior)
+        return AgentQueryResult(
             language=language,
             summary="",
             answer=answer,
-            rows_page=[],
             total_results=0,
             shown_results=0,
             has_more=False,
-            show_certification_details=False,
+            analysis=_stub_analysis(language),
+            tool_calls_log=[],
         )
-        _append_history(state_key, query_text, answer, prior)
-        return result
 
-    analysis, rows = _tool_query_database(query_text, preferred_language)
+    system_prompt = _SYSTEM_PROMPT_PT if language == "pt" else _SYSTEM_PROMPT_EN
+    messages: list[dict] = [{"role": "system", "content": system_prompt}]
 
-    if not rows and _should_use_web_search(normalized_query):
-        web_hits = _tool_web_search(query_text)
-        if web_hits:
-            language = analysis.language
-            summary = "Sem resultados locais; encontrei referências na web." if language == "pt" else "No local matches found; I found web references."
-            answer = _build_web_answer(web_hits, language)
-            return AgentQueryResult(
-                analysis=analysis,
-                language=language,
-                summary=summary,
-                answer=answer,
-                rows_page=[],
-                total_results=len(web_hits),
-                shown_results=min(len(web_hits), 5),
-                has_more=False,
-                show_certification_details=False,
+    if prior:
+        for past_user, past_assistant in prior.history[-6:]:
+            if past_user:
+                messages.append({"role": "user", "content": past_user})
+            if past_assistant:
+                messages.append({"role": "assistant", "content": past_assistant})
+
+    messages.append({"role": "user", "content": query_text})
+
+    tool_call_count = 0
+    tool_calls_log: list[dict] = []
+    answer = ""
+    for iteration in range(MAX_AGENT_ITERATIONS):
+        try:
+            response = client.chat.completions.create(
+                model=settings.azure_openai_chat_deployment,
+                messages=messages,
+                tools=TOOLS,
+                tool_choice="auto",
+                temperature=0.3,
+                max_completion_tokens=900,
             )
+        except Exception:
+            logger.exception("Agent loop: LLM call failed on iteration %d", iteration)
+            break
 
-    summary, answer, language = build_summary(
-        query_text,
-        rows,
-        analysis.language,
-        analysis.query_type,
-        analysis.wants_certification_details,
-        analysis.wants_experience_summary,
-    )
+        msg = response.choices[0].message
+        if not msg.tool_calls:
+            answer = (msg.content or "").strip()
+            break
 
-    names = _unique_employee_names(rows)
-    if analysis.query_type == "certifications" and not analysis.wants_certification_details:
-        shown = min(len(names), NAMES_PAGE_SIZE)
-        has_more = len(names) > shown
-        rows_page = []
-        names_cursor = shown
-        total_results = len(names)
-    elif analysis.query_type == "experience":
-        shown = min(len(names), NAMES_PAGE_SIZE)
-        has_more = len(names) > shown
-        rows_page = rows[:shown]
-        names_cursor = shown
-        total_results = len(names)
-    else:
-        shown = min(len(rows), PAGE_SIZE)
-        has_more = len(rows) > shown
-        rows_page = rows[:shown]
-        names_cursor = min(len(names), NAMES_PAGE_SIZE)
-        total_results = len(rows)
+        # Append assistant turn with tool calls
+        messages.append({
+            "role": "assistant",
+            "content": msg.content or "",
+            "tool_calls": [
+                {
+                    "id": tc.id,
+                    "type": "function",
+                    "function": {
+                        "name": tc.function.name,
+                        "arguments": tc.function.arguments,
+                    },
+                }
+                for tc in msg.tool_calls
+            ],
+        })
 
-    with _STATE_LOCK:
-        _STATE[state_key] = ConversationState(
-            intent=analysis.query_type,
-            language=language,
-            show_certification_details=analysis.wants_certification_details,
-            rows=list(rows),
-            cursor=shown,
-            names=names,
-            names_cursor=names_cursor,
-            history=_next_history(prior.history if prior else [], query_text, answer),
+        # Execute each requested tool
+        for tool_call in msg.tool_calls:
+            tool_call_count += 1
+            try:
+                args = json.loads(tool_call.function.arguments)
+            except Exception:
+                args = {}
+            result = _dispatch_tool(tool_call.function.name, args)
+            result_count = (
+                result.get("total_found", 0)
+                if isinstance(result, dict)
+                else 0
+            )
+            tool_calls_log.append({
+                "tool": tool_call.function.name,
+                "args": args,
+                "result_count": result_count,
+            })
+            messages.append({
+                "role": "tool",
+                "tool_call_id": tool_call.id,
+                "content": json.dumps(result, ensure_ascii=False, default=str),
+            })
+
+    if not answer:
+        answer = (
+            "Não foi possível processar a sua pergunta. Por favor tente novamente."
+            if language == "pt"
+            else "Unable to process your query. Please try again."
         )
 
+    _save_state(state_key, language, query_text, answer, prior)
+
     return AgentQueryResult(
-        analysis=analysis,
         language=language,
-        summary=summary,
+        summary="",
         answer=answer,
-        rows_page=rows_page,
-        total_results=total_results,
-        shown_results=shown,
-        has_more=has_more,
-        show_certification_details=analysis.wants_certification_details,
+        total_results=tool_call_count,
+        shown_results=0,
+        has_more=False,
+        analysis=_stub_analysis(language),
+        tool_calls_log=tool_calls_log,
     )
 
 
-def _continue_from_history(state: ConversationState) -> AgentQueryResult:
-    analysis = QueryAnalysis(
-        query_type=state.intent,
-        language=state.language,
-        normalized_query="",
-        tokens=[],
-        vendor_terms=[],
-        employee_terms=[],
-        expired_only=False,
-        active_only=False,
-        storage_only=False,
-        wants_certification_details=state.show_certification_details,
-        wants_employee_names_only=False,
-        wants_experience_summary=False,
-    )
-
-    if state.intent == "certifications" and state.show_certification_details:
-        start = state.cursor
-        end = min(start + PAGE_SIZE, len(state.rows))
-        rows_page = state.rows[start:end]
-        state.cursor = end
-        has_more = state.cursor < len(state.rows)
-        answer = _build_more_details_answer(rows_page, state.language)
-        shown = end
-        total = len(state.rows)
-    else:
-        start = state.names_cursor
-        end = min(start + NAMES_PAGE_SIZE, len(state.names))
-        next_names = state.names[start:end]
-        state.names_cursor = end
-        has_more = state.names_cursor < len(state.names)
-        rows_page = [
-            {"employee_name": name, "headline": "profile", "snippet": "", "source_document": "", "language": state.language}
-            for name in next_names
-        ]
-        answer = _build_more_names_answer(next_names, state.intent, state.language)
-        shown = end
-        total = len(state.names)
-
-    summary = _more_summary(state.language, shown, total)
-    return AgentQueryResult(
-        analysis=analysis,
-        language=state.language,
-        summary=summary,
-        answer=answer,
-        rows_page=rows_page,
-        total_results=total,
-        shown_results=shown,
-        has_more=has_more,
-        show_certification_details=state.show_certification_details,
-    )
+# ------------------------------------------------------------------ #
+# Tool dispatcher                                                      #
+# ------------------------------------------------------------------ #
 
 
-def _tool_query_database(query_text: str, preferred_language: str | None) -> tuple[QueryAnalysis, list[dict]]:
-    analysis, rows = run_query(query_text, preferred_language)
-    return analysis, list(rows)
-
-
-def _tool_web_search(query_text: str) -> list[str]:
-    url = "https://api.duckduckgo.com/"
-    params = {
-        "q": query_text,
-        "format": "json",
-        "no_redirect": 1,
-        "skip_disambig": 1,
-    }
+def _dispatch_tool(name: str, args: dict) -> Any:
     try:
-        with httpx.Client(timeout=6.0) as client:
-            response = client.get(url, params=params)
+        if name == "search_certifications":
+            return _tool_search_certifications(
+                **{k: v for k, v in args.items() if k in ("query", "employee_name", "status")}
+            )
+        if name == "search_experience":
+            return _tool_search_experience(
+                **{k: v for k, v in args.items() if k in ("query", "employee_name")}
+            )
+        if name == "get_employee_profile":
+            return _tool_get_employee_profile(args.get("employee_name", ""))
+        if name == "list_employees":
+            return _tool_list_employees()
+        if name == "search_web":
+            return _tool_search_web(args.get("query", ""))
+    except Exception:
+        logger.exception("Agent: tool %s raised an exception with args %s", name, args)
+        return {"error": f"Tool '{name}' failed unexpectedly"}
+    logger.warning("Agent: unknown tool requested: %s", name)
+    return {"error": f"Unknown tool: {name}"}
+
+
+# ------------------------------------------------------------------ #
+# Tool implementations                                                 #
+# ------------------------------------------------------------------ #
+
+
+def _tool_search_certifications(
+    query: str,
+    employee_name: str | None = None,
+    status: str = "any",
+) -> dict:
+    from agent_cv.services.retrieval_service import _embed_query, _search_semantic_chunks
+
+    structured = _sql_search_certifications(query, employee_name, status)
+
+    query_vector = _embed_query(query)
+    semantic_excerpts: list[dict] = []
+    if query_vector:
+        scoped = [employee_name] if employee_name else []
+        for s in _search_semantic_chunks(query_vector, "certifications", scoped):
+            semantic_excerpts.append({
+                "employee_name": s.employee_name,
+                "source": s.source,
+                "relevance_score": round(s.score, 3),
+                "excerpt": s.text[:300],
+            })
+
+    return {
+        "certifications": structured,
+        "semantic_excerpts": semantic_excerpts[:5],
+        "total_found": len(structured),
+    }
+
+
+def _sql_search_certifications(
+    query: str,
+    employee_name: str | None,
+    status: str,
+) -> list[dict]:
+    norm = normalize_text(query)
+    tokens = [t for t in norm.split() if len(t) >= 3][:6]
+
+    where_parts: list[str] = []
+    params: list[Any] = []
+
+    if employee_name:
+        where_parts.append("lower(e.full_name) like %s")
+        params.append(f"%{normalize_text(employee_name)}%")
+
+    if status == "active":
+        where_parts.append("c.status <> 'expired'")
+    elif status == "expired":
+        where_parts.append("c.status = 'expired'")
+
+    if tokens:
+        token_clauses: list[str] = []
+        for token in tokens:
+            token_clauses.append(
+                "(lower(c.cert_name) like %s "
+                "or lower(coalesce(v.vendor_name, '')) like %s "
+                "or lower(e.full_name) like %s)"
+            )
+            params.extend([f"%{token}%", f"%{token}%", f"%{token}%"])
+        where_parts.append("(" + " or ".join(token_clauses) + ")")
+
+    sql = """
+        select
+            e.full_name as employee_name,
+            c.cert_name as certification_name,
+            coalesce(v.vendor_name, 'Unknown') as vendor,
+            c.status,
+            c.issue_date,
+            c.expiry_date
+        from certifications c
+        join employees e on e.employee_id = c.employee_id
+        left join vendors v on v.vendor_id = c.vendor_id
+    """
+    if where_parts:
+        sql += " where " + " and ".join(where_parts)
+    sql += " order by e.full_name, c.expiry_date nulls last limit 50"
+
+    try:
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+                return [dict(row) for row in cur.fetchall()]
+    except Exception:
+        logger.exception("Agent: _sql_search_certifications failed")
+        return []
+
+
+def _tool_search_experience(
+    query: str,
+    employee_name: str | None = None,
+) -> dict:
+    from agent_cv.services.retrieval_service import _embed_query, _search_semantic_chunks
+
+    query_vector = _embed_query(query)
+    if not query_vector:
+        return {"experience_snippets": [], "total_found": 0, "note": "Embedding unavailable"}
+
+    scoped = [employee_name] if employee_name else []
+    snippets = _search_semantic_chunks(query_vector, "experience", scoped)
+
+    return {
+        "experience_snippets": [
+            {
+                "employee_name": s.employee_name,
+                "source": s.source,
+                "relevance_score": round(s.score, 3),
+                "excerpt": s.text[:400],
+            }
+            for s in snippets
+        ],
+        "total_found": len(snippets),
+    }
+
+
+def _tool_get_employee_profile(employee_name: str) -> dict:
+    norm = normalize_text(employee_name)
+    try:
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "select employee_id, full_name, primary_language, department "
+                    "from employees where lower(full_name) like %s limit 3",
+                    (f"%{norm}%",),
+                )
+                employees = cur.fetchall()
+                if not employees:
+                    return {"error": f"No employee found matching '{employee_name}'"}
+
+                emp = employees[0]
+                emp_id = emp["employee_id"]
+
+                cur.execute(
+                    """
+                    select c.cert_name, coalesce(v.vendor_name, 'Unknown') as vendor,
+                           c.status, c.issue_date, c.expiry_date
+                    from certifications c
+                    left join vendors v on v.vendor_id = c.vendor_id
+                    where c.employee_id = %s
+                    order by c.expiry_date nulls last
+                    """,
+                    (emp_id,),
+                )
+                certs = [dict(r) for r in cur.fetchall()]
+
+                cur.execute(
+                    """
+                    select cs.section_type, left(cs.section_text, 500) as section_text
+                    from cv_sections cs
+                    join document_versions dv on dv.document_version_id = cs.document_version_id
+                    join source_documents sd on sd.document_id = dv.document_id
+                    where sd.employee_id = %s and dv.is_current = true
+                    order by cs.section_type
+                    limit 10
+                    """,
+                    (emp_id,),
+                )
+                sections = [dict(r) for r in cur.fetchall()]
+
+        return {
+            "employee": {
+                "name": emp["full_name"],
+                "department": emp.get("department"),
+                "language": emp.get("primary_language"),
+            },
+            "certifications": certs,
+            "cv_sections": sections,
+            "other_matches": [e["full_name"] for e in employees[1:]],
+        }
+    except Exception:
+        logger.exception("Agent: get_employee_profile failed for '%s'", employee_name)
+        return {"error": "Failed to retrieve employee profile"}
+
+
+def _tool_list_employees() -> dict:
+    try:
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "select full_name, department, primary_language from employees order by full_name"
+                )
+                rows = cur.fetchall()
+        return {"employees": [dict(r) for r in rows], "total": len(rows)}
+    except Exception:
+        logger.exception("Agent: list_employees failed")
+        return {"employees": [], "total": 0}
+
+
+def _tool_search_web(query: str) -> dict:
+    url = "https://api.duckduckgo.com/"
+    params = {"q": query, "format": "json", "no_redirect": 1, "skip_disambig": 1}
+    try:
+        with httpx.Client(timeout=6.0) as http:
+            response = http.get(url, params=params)
             response.raise_for_status()
             body = response.json()
     except Exception:
-        return []
+        return {"results": [], "error": "Web search unavailable"}
 
     hits: list[str] = []
     abstract = (body.get("AbstractText") or "").strip()
     heading = (body.get("Heading") or "").strip()
     if abstract:
         hits.append(f"{heading}: {abstract}" if heading else abstract)
-
-    related = body.get("RelatedTopics") or []
-    for item in related:
+    for item in body.get("RelatedTopics") or []:
         if isinstance(item, dict):
             text = (item.get("Text") or "").strip()
             if text:
                 hits.append(text)
         if len(hits) >= 5:
             break
-    return hits[:5]
+    return {"results": hits[:5]}
 
 
-def _is_follow_up_more(normalized_query: str) -> bool:
-    return any(marker in normalized_query for marker in FOLLOW_UP_MORE_MARKERS)
+# ------------------------------------------------------------------ #
+# Helpers                                                              #
+# ------------------------------------------------------------------ #
 
 
-def _should_use_web_search(normalized_query: str) -> bool:
-    return any(marker in normalized_query for marker in WEB_SEARCH_MARKERS)
+def _detect_language(query: str, prior: ConversationState | None) -> str:
+    if prior:
+        return prior.language
+    norm = normalize_text(query)
+    pt_score = sum(
+        1 for m in {"quem", "tem", "qual", "quais", "certificacoes", "experiencia", "colaborador", "ola", "obrigado"}
+        if m in norm
+    )
+    en_score = sum(
+        1 for m in {"who", "has", "which", "what", "certifications", "experience", "employee", "hello", "thanks"}
+        if m in norm
+    )
+    return "pt" if pt_score > en_score else "en"
 
 
-def _unique_employee_names(rows: list[dict]) -> list[str]:
-    names: list[str] = []
-    for row in rows:
-        name = row.get("employee_name") or "Unknown"
-        if name not in names:
-            names.append(name)
-    return names
-
-
-def _build_more_details_answer(rows: list[dict], language: str) -> str:
-    if not rows:
-        return "Não há mais certificações para mostrar." if language == "pt" else "There are no more certifications to show."
-
-    lines: list[str] = []
-    for row in rows:
-        lines.append(
-            f"- {row.get('employee_name', 'Employee')} | {row.get('certification_name', 'Certification')} | {row.get('vendor', 'Vendor')} | {row.get('status', 'unknown')}"
-        )
-    return "\n".join(lines)
-
-
-def _build_more_names_answer(names: list[str], intent: str, language: str) -> str:
-    if not names:
-        return "Não há mais resultados para mostrar." if language == "pt" else "There are no more results to show."
-
-    return "- " + "\n- ".join(names)
-
-
-def _more_summary(language: str, shown: int, total: int) -> str:
-    return ""
-
-
-def _build_web_answer(hits: list[str], language: str) -> str:
+def _no_llm_fallback(language: str) -> str:
     if language == "pt":
-        return "Referências externas:\n- " + "\n- ".join(hits)
-    return "External references:\n- " + "\n- ".join(hits)
+        return "O serviço de linguagem não está configurado. Verifique as variáveis AZURE_OPENAI_* no ficheiro .env."
+    return "Language service is not configured. Please check AZURE_OPENAI_* environment variables."
 
 
-def _is_conversational_turn(normalized_query: str) -> bool:
-    if not normalized_query:
-        return True
-    if any(re.search(pattern, normalized_query, re.IGNORECASE) for pattern in GREETING_PATTERNS):
-        return True
-    if any(marker in normalized_query for marker in CHAT_MARKERS):
-        return True
-    if not _looks_like_data_query(normalized_query) and any(
-        token in normalized_query for token in {"voce", "você", "you", "assistant", "agente", "bot"}
-    ):
-        return True
-    if len(normalized_query.split()) <= 2 and not _looks_like_data_query(normalized_query):
-        return True
-    return False
-
-
-def _looks_like_data_query(normalized_query: str) -> bool:
-    return any(hint in normalized_query for hint in DATA_QUERY_HINTS)
-
-
-def _detect_language(normalized_query: str) -> str:
-    pt_markers = {"ola", "olá", "obrigado", "obrigada", "ajuda", "quais", "quem", "colaborador"}
-    en_markers = {"hello", "thanks", "help", "which", "who", "employee"}
-    pt_score = sum(1 for marker in pt_markers if marker in normalized_query)
-    en_score = sum(1 for marker in en_markers if marker in normalized_query)
-    return "pt" if pt_score >= en_score else "en"
-
-
-def _chat_analysis(language: str) -> QueryAnalysis:
+def _stub_analysis(language: str) -> QueryAnalysis:
     return QueryAnalysis(
         query_type="chat",
         language=language,
@@ -404,101 +627,20 @@ def _chat_analysis(language: str) -> QueryAnalysis:
     )
 
 
-def _append_history(
+def _save_state(
     state_key: str,
-    user_message: str,
-    assistant_message: str,
-    prior: ConversationState | None = None,
-) -> None:
-    with _STATE_LOCK:
-        state = _STATE.get(state_key) or prior
-        if state is None:
-            _STATE[state_key] = ConversationState(
-                intent="chat",
-                language=_detect_language((user_message or "").lower()),
-                show_certification_details=False,
-                rows=[],
-                cursor=0,
-                names=[],
-                names_cursor=0,
-                history=_next_history([], user_message, assistant_message),
-            )
-            return
-        state.history = _next_history(state.history, user_message, assistant_message)
-
-
-def _next_history(
-    history: list[tuple[str, str]],
-    user_message: str,
-    assistant_message: str,
-    limit: int = 8,
-) -> list[tuple[str, str]]:
-    updated = list(history)
-    updated.append((user_message.strip(), assistant_message.strip()))
-    return updated[-limit:]
-
-
-def _tool_chat_completion(
-    state_key: str,
-    user_message: str,
     language: str,
+    user_msg: str,
+    assistant_msg: str,
     prior: ConversationState | None,
-) -> str:
-    # Fast-path deterministic replies for common greetings and thanks.
-    norm = (user_message or "").strip().lower()
-    if any(re.search(pattern, norm, re.IGNORECASE) for pattern in GREETING_PATTERNS):
-        if language == "pt":
-            return (
-                "Olá. Posso ajudar com perguntas sobre certificações e experiência profissional. "
-            )
-        return (
-            "Hello. I can help with certification and professional experience questions. "
+) -> None:
+    history = list(prior.history if prior else [])
+    history.append((user_msg.strip(), assistant_msg.strip()))
+    with _STATE_LOCK:
+        _STATE[state_key] = ConversationState(
+            language=language,
+            history=history[-8:],
         )
-
-    if any(token in norm for token in {"obrigado", "obrigada", "thanks", "thank you"}):
-        return "De nada. Quando quiser, faça a próxima pergunta." if language == "pt" else "You're welcome. Ask me anything when you're ready."
-
-    client = _get_chat_client()
-    deployment = settings.azure_openai_chat_deployment
-    if client is None or not deployment:
-        return (
-            "Posso continuar a conversa e ajudar com perguntas sobre certificações e experiência." if language == "pt"
-            else "I can continue the conversation and help with certification and experience questions."
-        )
-
-    history = prior.history if prior else []
-    messages: list[dict] = [
-        {
-            "role": "system",
-            "content": (
-                "You are Agent CV assistant. Be concise, friendly, and conversational. "
-                "Do not reveal personal information beyond employee names. "
-                "If the user asks generic chat/help questions, answer directly without querying data."
-            ),
-        }
-    ]
-
-    for past_user, past_assistant in history[-4:]:
-        if past_user:
-            messages.append({"role": "user", "content": past_user})
-        if past_assistant:
-            messages.append({"role": "assistant", "content": past_assistant})
-
-    messages.append({"role": "user", "content": user_message})
-    try:
-        response = client.chat.completions.create(
-            model=deployment,
-            messages=messages,
-            temperature=0.3,
-            max_completion_tokens=300,
-        )
-        content = (response.choices[0].message.content or "").strip()
-        if content:
-            return content
-    except Exception:
-        pass
-
-    return "Posso ajudar com isso." if language == "pt" else "I can help with that."
 
 
 @lru_cache(maxsize=1)

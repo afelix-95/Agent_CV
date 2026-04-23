@@ -13,7 +13,7 @@ from agent_cv.api.models import (
 from agent_cv.db.schema import apply_schema
 from agent_cv.ingestion.ingest_service import ingest_documents
 from agent_cv.db.connection import get_connection
-from agent_cv.services.query_service import audit_query, infer_intent, run_query
+from agent_cv.services.query_service import audit_query
 from agent_cv.services.agent_service import handle_user_query
 from agent_cv.config import settings
 from agent_cv.services.graph_service import graph_setup_issue
@@ -60,7 +60,7 @@ def audit_logs_recent(limit: int = Query(50, ge=1, le=500)) -> AuditLogsResponse
                     response_language,
                     result_count,
                     latency_ms,
-                    normalized_intent_json,
+                    agent_tool_calls,
                     created_at
                 from query_audit
                 order by created_at desc
@@ -90,6 +90,7 @@ def query(request: QueryRequest) -> QueryResponse:
         response_language=agent_result.language,
         result_count=agent_result.total_results,
         latency_ms=int((time.perf_counter() - started) * 1000),
+        tool_calls_log=agent_result.tool_calls_log,
     )
 
     certifications = []
@@ -131,6 +132,7 @@ def _safe_audit(
     response_language: str,
     result_count: int,
     latency_ms: int,
+    tool_calls_log: list | None = None,
 ) -> None:
     try:
         audit_query(
@@ -139,7 +141,7 @@ def _safe_audit(
             response_language=response_language,
             result_count=result_count,
             latency_ms=latency_ms,
-            normalized_intent=infer_intent(query_text),
+            agent_tool_calls=tool_calls_log or [],
         )
     except Exception:
         # Auditing should not block user responses.

@@ -54,7 +54,7 @@ class AuditLogEntry(BaseModel):
     response_language: str
     result_count: int
     latency_ms: int
-    normalized_intent_json: dict | None = None
+    agent_tool_calls: list | None = None
     created_at: datetime
 
 

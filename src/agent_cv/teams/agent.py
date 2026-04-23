@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING
 from agent_cv.config import settings
 from agent_cv.services.agent_service import handle_user_query
 from agent_cv.services.graph_service import get_graph_client
-from agent_cv.services.query_service import audit_query, infer_intent
+from agent_cv.services.query_service import audit_query
 
 if TYPE_CHECKING:
     from msgraph import GraphServiceClient
@@ -202,6 +202,7 @@ class GraphPollingBot:
                 latency_ms=int((time.perf_counter() - started) * 1000),
                 sender_id=sender_id,
                 chat_id=chat_id,
+                tool_calls_log=[],
             )
         else:
             reply_text = _build_reply(result)
@@ -213,6 +214,7 @@ class GraphPollingBot:
                 latency_ms=int((time.perf_counter() - started) * 1000),
                 sender_id=sender_id,
                 chat_id=chat_id,
+                tool_calls_log=result.tool_calls_log,
             )
 
         try:
@@ -282,6 +284,7 @@ def _safe_audit(
     latency_ms: int,
     sender_id: str | None,
     chat_id: str | None = None,
+    tool_calls_log: list | None = None,
 ) -> None:
     try:
         audit_query(
@@ -290,7 +293,7 @@ def _safe_audit(
             response_language=response_language,
             result_count=result_count,
             latency_ms=latency_ms,
-            normalized_intent=infer_intent(query_text),
+            agent_tool_calls=tool_calls_log or [],
             aad_object_id=sender_id,
             chat_id=chat_id,
         )

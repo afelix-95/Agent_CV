@@ -87,37 +87,9 @@ create table if not exists certifications (
     check (expiry_date is null or issue_date is null or expiry_date >= issue_date)
 );
 
-create table if not exists certification_status_history (
-    certification_status_history_id uuid primary key default gen_random_uuid(),
-    certification_id uuid not null references certifications(certification_id) on delete cascade,
-    old_status text,
-    new_status text not null,
-    changed_at timestamptz not null default now(),
-    change_reason text
-);
-
-create table if not exists skill_categories (
-    skill_category_id uuid primary key default gen_random_uuid(),
-    category_name text not null unique,
-    description text
-);
-
-create table if not exists skill_terms (
-    skill_term_id uuid primary key default gen_random_uuid(),
-    skill_category_id uuid not null references skill_categories(skill_category_id) on delete cascade,
-    term text not null,
-    term_type text not null,
-    weight numeric(5,4) not null default 1.0,
-    unique (skill_category_id, term)
-);
-
-create table if not exists certification_skill_map (
-    certification_id uuid not null references certifications(certification_id) on delete cascade,
-    skill_category_id uuid not null references skill_categories(skill_category_id) on delete cascade,
-    mapping_source text not null,
-    mapping_confidence numeric(5,4),
-    primary key (certification_id, skill_category_id)
-);
+-- certification_status_history, skill_categories, skill_terms, certification_skill_map
+-- are intentionally omitted: they were designed for the old keyword-heuristic pipeline
+-- which has been replaced by the LLM agent. They can be re-added if needed.
 
 create table if not exists teams_users (
     teams_user_id uuid primary key default gen_random_uuid(),
@@ -133,7 +105,7 @@ create table if not exists query_audit (
     chat_id text,
     query_text text not null,
     query_language text,
-    normalized_intent_json jsonb,
+    agent_tool_calls jsonb,           -- array of {tool, args, result_count} objects
     response_language text,
     result_count integer,
     latency_ms integer,
@@ -167,17 +139,22 @@ create index if not exists idx_cert_employee on certifications (employee_id);
 create index if not exists idx_employees_department on employees (department);
 create index if not exists idx_source_documents_status_created on source_documents (ingest_status, created_at);
 create index if not exists idx_cert_name_trgm on certifications using gin (cert_name gin_trgm_ops);
+create index if not exists idx_cert_code_trgm on certifications using gin (cert_code gin_trgm_ops)
+    where cert_code is not null;
 create index if not exists idx_vendor_name_trgm on vendors using gin (vendor_name gin_trgm_ops);
-create index if not exists idx_skill_term_trgm on skill_terms using gin (term gin_trgm_ops);
+create index if not exists idx_vendor_aliases_gin on vendors using gin (aliases);
 
 create index if not exists idx_cert_expiry_active on certifications (expiry_date)
 where status in ('active', 'expiring_90d');
 
-insert into skill_categories (category_name, description)
-values
-    ('storage', 'Storage technologies and certifications'),
-    ('networking', 'Network infrastructure certifications'),
-    ('cloud', 'Cloud platform certifications'),
-    ('virtualization', 'Virtualization technologies'),
-    ('security', 'Security certifications')
-on conflict (category_name) do nothing;
+-- HNSW vector indexes for fast approximate nearest-neighbour search.
+-- m=16, ef_construction=64 are sensible defaults for datasets under ~1M rows.
+create index if not exists idx_cv_chunks_embedding_hnsw
+    on cv_chunks using hnsw (embedding vector_cosine_ops)
+    with (m = 16, ef_construction = 64);
+
+create index if not exists idx_cert_chunks_embedding_hnsw
+    on certification_chunks using hnsw (embedding vector_cosine_ops)
+    with (m = 16, ef_construction = 64);
+
+create index if not exists idx_query_audit_created on query_audit (created_at desc);
