@@ -57,98 +57,19 @@ def ingest_documents(
     with get_connection() as conn:
         with conn.cursor() as cur:
             for file_path in files:
-                digest = _hash_file(file_path)
                 if force_reingest and _delete_existing_document(cur, file_path):
                     reingested += 1
 
-                cur.execute("select document_id from source_documents where sha256_hash = %s", (digest,))
-                if cur.fetchone():
-                    skipped += 1
-                    continue
-
-                parsed = parse_file_name(file_path)
-                text = _extract_text(file_path)
-                detected_language = detect_language(text)
-
-                cur.execute(
-                    """
-                    insert into employees (full_name)
-                    values (%s)
-                    on conflict (full_name) do update set updated_at = now()
-                    returning employee_id
-                    """,
-                    (parsed.employee_name,),
-                )
-                employee = cur.fetchone()
-                employee_id = employee["employee_id"]
-
-                cur.execute(
-                    """
-                    insert into source_documents (
-                        employee_id, source_system, source_path, original_filename,
-                        mime_type, sha256_hash, detected_language, ingest_status
-                    ) values (%s, %s, %s, %s, %s, %s, %s, %s)
-                    returning document_id
-                    """,
-                    (
-                        employee_id,
-                        "local",
-                        str(file_path),
-                        file_path.name,
-                        "application/pdf" if file_path.suffix.lower() == ".pdf" else "text/plain",
-                        digest,
-                        detected_language,
-                        "ingested",
-                    ),
-                )
-                doc = cur.fetchone()
-                document_id = doc["document_id"]
-
-                cur.execute(
-                    """
-                    insert into document_versions (
-                        document_id, version_number, blob_uri, text_snapshot,
-                        extraction_confidence, is_current
-                    ) values (%s, 1, %s, %s, %s, true)
-                    returning document_version_id
-                    """,
-                    (document_id, str(file_path), text[:50000], 0.60),
-                )
-                version = cur.fetchone()
-                document_version_id = version["document_version_id"]
-
-                if parsed.is_cv:
-                    cur.execute(
-                        """
-                        insert into cv_sections (
-                            employee_id, document_version_id, section_type, section_text, language_code
-                        ) values (%s, %s, %s, %s, %s)
-                        """,
-                        (employee_id, document_version_id, "summary", text[:10000], detected_language),
-                    )
-                    _store_cv_chunks(cur, employee_id, document_version_id, text, detected_language)
+                if _ingest_one_file(
+                    cur,
+                    actual_path=file_path,
+                    logical_path=file_path,
+                    source_system="local",
+                    source_path=str(file_path),
+                ):
+                    inserted += 1
                 else:
-                    is_transcript = detect_is_transcript(file_path.name)
-                    vision_certs = []
-                    
-                    if is_transcript or (text and len(text.strip()) < 500):
-                        try:
-                            vision_certs = extract_all_certificates_from_pdf(
-                                str(file_path), is_transcript=is_transcript
-                            )
-                        except Exception:
-                            vision_certs = []
-                    
-                    if vision_certs:
-                        _store_extracted_certificates(
-                            cur, employee_id, document_version_id, vision_certs, text, detected_language
-                        )
-                    elif not is_transcript:
-                        _store_single_certification(
-                            cur, employee_id, document_version_id, parsed, text, detected_language
-                        )
-
-                inserted += 1
+                    skipped += 1
         conn.commit()
 
     return {
@@ -157,6 +78,164 @@ def ingest_documents(
         "scanned": len(files),
         "reingested": reingested,
     }
+
+
+def ingest_sharepoint_file(
+    filename: str,
+    content: bytes,
+    sharepoint_item_id: str,
+    sharepoint_web_url: str,
+) -> dict[str, int]:
+    """Ingest a single file downloaded from SharePoint.
+
+    Writes the content to a temporary file, runs it through the normal ingestion
+    pipeline, then removes the temp file.  The ``sharepoint_item_id`` and
+    ``sharepoint_web_url`` are persisted on the ``source_documents`` row so the
+    agent can later share the link in Teams.
+    """
+    import tempfile
+
+    logical_path = Path(filename)
+    suffix = logical_path.suffix.lower()
+    if suffix not in SUPPORTED:
+        return {"inserted": 0, "skipped": 1, "scanned": 1, "reingested": 0}
+
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+        tmp.write(content)
+        tmp_path = Path(tmp.name)
+
+    try:
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                inserted = _ingest_one_file(
+                    cur,
+                    actual_path=tmp_path,
+                    logical_path=logical_path,
+                    source_system="sharepoint",
+                    source_path=sharepoint_item_id,
+                    sharepoint_item_id=sharepoint_item_id,
+                    sharepoint_web_url=sharepoint_web_url,
+                )
+            conn.commit()
+
+        return {
+            "inserted": 1 if inserted else 0,
+            "skipped": 0 if inserted else 1,
+            "scanned": 1,
+            "reingested": 0,
+        }
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+
+def _ingest_one_file(
+    cur,
+    actual_path: Path,
+    logical_path: Path,
+    source_system: str,
+    source_path: str,
+    sharepoint_item_id: str | None = None,
+    sharepoint_web_url: str | None = None,
+) -> bool:
+    """Insert a single file into the database.
+
+    ``actual_path`` is the real path on disk used for text/vision extraction.
+    ``logical_path`` carries the original filename for metadata parsing.
+
+    Returns True if the document was inserted, False if it already existed.
+    """
+    digest = _hash_file(actual_path)
+
+    cur.execute("select document_id from source_documents where sha256_hash = %s", (digest,))
+    if cur.fetchone():
+        return False
+
+    parsed = parse_file_name(logical_path)
+    text = _extract_text(actual_path)
+    detected_language = detect_language(text)
+
+    cur.execute(
+        """
+        insert into employees (full_name)
+        values (%s)
+        on conflict (full_name) do update set updated_at = now()
+        returning employee_id
+        """,
+        (parsed.employee_name,),
+    )
+    employee = cur.fetchone()
+    employee_id = employee["employee_id"]
+
+    cur.execute(
+        """
+        insert into source_documents (
+            employee_id, source_system, source_path, original_filename,
+            mime_type, sha256_hash, detected_language, ingest_status,
+            sharepoint_item_id, sharepoint_web_url
+        ) values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        returning document_id
+        """,
+        (
+            employee_id,
+            source_system,
+            source_path,
+            logical_path.name,
+            "application/pdf" if logical_path.suffix.lower() == ".pdf" else "text/plain",
+            digest,
+            detected_language,
+            "ingested",
+            sharepoint_item_id,
+            sharepoint_web_url,
+        ),
+    )
+    doc = cur.fetchone()
+    document_id = doc["document_id"]
+
+    cur.execute(
+        """
+        insert into document_versions (
+            document_id, version_number, blob_uri, text_snapshot,
+            extraction_confidence, is_current
+        ) values (%s, 1, %s, %s, %s, true)
+        returning document_version_id
+        """,
+        (document_id, source_path, text[:50000], 0.60),
+    )
+    version = cur.fetchone()
+    document_version_id = version["document_version_id"]
+
+    if parsed.is_cv:
+        cur.execute(
+            """
+            insert into cv_sections (
+                employee_id, document_version_id, section_type, section_text, language_code
+            ) values (%s, %s, %s, %s, %s)
+            """,
+            (employee_id, document_version_id, "summary", text[:10000], detected_language),
+        )
+        _store_cv_chunks(cur, employee_id, document_version_id, text, detected_language)
+    else:
+        is_transcript = detect_is_transcript(logical_path.name)
+        vision_certs = []
+
+        if is_transcript or (text and len(text.strip()) < 500):
+            try:
+                vision_certs = extract_all_certificates_from_pdf(
+                    str(actual_path), is_transcript=is_transcript
+                )
+            except Exception:
+                vision_certs = []
+
+        if vision_certs:
+            _store_extracted_certificates(
+                cur, employee_id, document_version_id, vision_certs, text, detected_language
+            )
+        elif not is_transcript:
+            _store_single_certification(
+                cur, employee_id, document_version_id, parsed, text, detected_language
+            )
+
+    return True
 
 
 def _delete_existing_document(cur, file_path: Path) -> bool:

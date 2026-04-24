@@ -28,7 +28,19 @@ class Settings(BaseSettings):
     # How often (in seconds) the polling bot checks for new messages
     graph_poll_interval: int = 5
 
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
+    # SharePoint document library watcher
+    # Drive ID of the SharePoint library to monitor.
+    # Find it via GET /me/drive/sharedWithMe -> remoteItem.parentReference.driveId
+    sharepoint_drive_id: str = ""
+    # Option A: subfolder path within the drive root (e.g. "CV Repository")
+    sharepoint_folder_path: str = ""
+    # Option B: item ID of a specific shared folder (remoteItem.id from /me/drive/sharedWithMe).
+    # When set, takes precedence over sharepoint_folder_path.
+    sharepoint_folder_item_id: str = ""
+    # How often (in seconds) to check the SharePoint library for new files
+    sharepoint_poll_interval: int = 300
+
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
 
 settings = Settings()

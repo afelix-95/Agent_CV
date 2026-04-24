@@ -109,6 +109,26 @@ TOOLS: list[dict] = [
     {
         "type": "function",
         "function": {
+            "name": "get_employee_cv_link",
+            "description": (
+                "Get the SharePoint link to an employee's CV document. "
+                "Use when the user asks to see, open, or share a specific employee's CV."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "employee_name": {
+                        "type": "string",
+                        "description": "Full or partial name of the employee",
+                    }
+                },
+                "required": ["employee_name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "search_web",
             "description": (
                 "Search the internet for information about certifications, technologies, or vendors. "
@@ -142,6 +162,7 @@ TOOLS AVAILABLE:
 • search_experience — search employee CVs for work experience and skills
 • get_employee_profile — retrieve the full profile for a specific employee
 • list_employees — list all employees in the system
+• get_employee_cv_link — get the SharePoint link to an employee's CV document
 • search_web — look up external information about certifications or technologies
 
 HOW TO RESPOND:
@@ -155,6 +176,9 @@ HOW TO RESPOND:
 8. End your reply with 1-2 relevant follow-up suggestions the user might find useful
 9. If tools return no data, say clearly what you searched for and suggest alternatives
 10. ALWAYS write exclusively in Latin script — never output characters from Georgian, Arabic, Cyrillic, Greek, or any other non-Latin alphabet, even as abbreviations or parenthetical notes
+11. When the user asks to see or share an employee's CV, call get_employee_cv_link and include the returned URL as a plain hyperlink in your reply
+12. When answering questions about expired or expiring certifications, ALWAYS call search_certifications with status="any" — never pre-filter to "expired" or "expiring" in the tool call. Filter and categorise in your answer instead, to avoid incomplete results.
+13. Certification results include an "inferred_expiry_date" field for records where the expiry date was not registered. If this field is a date (not null or "unknown"), use it as an estimated expiry and clearly label it as "estimated" or "inferred" in your answer. If it is null, the cert does not expire. If it is "unknown", you cannot infer an expiry date for that record.
 """
 
 _SYSTEM_PROMPT_PT = """\
@@ -167,6 +191,7 @@ FERRAMENTAS DISPONÍVEIS:
 • search_experience — pesquisar CVs por experiência profissional e competências
 • get_employee_profile — obter o perfil completo de um colaborador específico
 • list_employees — listar todos os colaboradores no sistema
+• get_employee_cv_link — obter o link do SharePoint para o CV de um colaborador
 • search_web — pesquisar informação externa sobre certificações ou tecnologias
 
 COMO RESPONDER:
@@ -180,6 +205,9 @@ COMO RESPONDER:
 8. Termina a resposta com 1-2 sugestões de perguntas de seguimento relevantes
 9. Se as ferramentas não retornarem dados, diz claramente o que pesquisaste e sugere alternativas
 10. Escreve SEMPRE exclusivamente em alfabeto latino — nunca uses caracteres do alfabeto georgiano, árabe, cirílico, grego ou qualquer outro alfabeto não-latino, mesmo em abreviaturas ou notas
+11. Quando o utilizador pedir para ver ou partilhar o CV de um colaborador, usa get_employee_cv_link e inclui o URL retornado como hiperligação na tua resposta
+12. Quando responderes a perguntas sobre certificações vencidas ou a vencer, usa SEMPRE search_certifications com status="any" — nunca pré-filtres para "expired" ou "expiring" na chamada da ferramenta. Filtra e categoriza na tua resposta, para evitar resultados incompletos.
+13. Os resultados de certificações incluem um campo "inferred_expiry_date" para registos em que a data de validade não foi registada. Se este campo contiver uma data (não nulo nem "unknown"), usa-a como validade estimada e indica claramente que é uma estimativa na tua resposta. Se for nulo, a certificação não expira. Se for "unknown", não é possível inferir a data de validade desse registo.
 """
 
 
@@ -361,6 +389,8 @@ def _dispatch_tool(name: str, args: dict) -> Any:
             return _tool_get_employee_profile(args.get("employee_name", ""))
         if name == "list_employees":
             return _tool_list_employees()
+        if name == "get_employee_cv_link":
+            return _tool_get_employee_cv_link(args.get("employee_name", ""))
         if name == "search_web":
             return _tool_search_web(args.get("query", ""))
     except Exception:
@@ -373,6 +403,111 @@ def _dispatch_tool(name: str, args: dict) -> Any:
 # ------------------------------------------------------------------ #
 # Tool implementations                                                 #
 # ------------------------------------------------------------------ #
+
+# Certification validity periods by vendor/cert keyword (months).
+# None = cert does not expire; omitted entries = cannot infer.
+# Ordered from most-specific to least-specific so the first match wins.
+_CERT_VALIDITY: list[tuple[str, int | None]] = [
+    # Certs that do not expire
+    ("itil foundation", None),
+    ("itil 4 foundation", None),
+    ("prince2 foundation", None),
+    # Microsoft – 1 year (all role-based and specialty certs since 2020)
+    # Fundamentals (az-900, ms-900, sc-900, dp-900) also expire after 1 yr
+    ("microsoft", 12),
+    ("azure", 12),
+    # AWS – 3 years
+    ("aws certified", 36),
+    ("aws", 36),
+    ("amazon web services", 36),
+    # Red Hat – 3 years
+    ("red hat", 36),
+    ("rhce", 36),
+    ("rhcsa", 36),
+    ("rhcva", 36),
+    # Cisco – 3 years
+    ("cisco", 36),
+    ("ccna", 36),
+    ("ccnp", 36),
+    ("ccie", 36),
+    ("cct", 36),
+    # CompTIA – 3 years (Continuing Education)
+    ("comptia", 36),
+    ("security+", 36),
+    ("network+", 36),
+    ("cysa+", 36),
+    ("pentest+", 36),
+    ("casp+", 36),
+    # Google Cloud – 2 years
+    ("google cloud", 24),
+    ("gcp", 24),
+    # Kubernetes / CNCF – 2 years
+    ("cka", 24),
+    ("ckad", 24),
+    ("cks", 24),
+    # VMware – 2 years
+    ("vmware", 24),
+    ("vcp", 24),
+    # Fortinet – 2 years
+    ("fortinet", 24),
+    ("nse ", 24),  # trailing space avoids matching "nsec" etc.
+    # Palo Alto Networks – 2 years
+    ("palo alto", 24),
+    ("pcnsa", 24),
+    ("pcnse", 24),
+    # HashiCorp – 2 years
+    ("hashicorp", 24),
+    ("terraform associate", 24),
+    # PMI – 3 years
+    ("pmp", 36),
+    ("pmi", 36),
+    # ISACA – 3 years
+    ("cism", 36),
+    ("cisa", 36),
+    ("crisc", 36),
+    # ISC2 – 3 years
+    ("cissp", 36),
+    ("ccsp", 36),
+    ("sscp", 36),
+]
+
+
+def _infer_expiry_date(cert_name: str, vendor: str, issue_date: object) -> object:
+    """Return an inferred expiry date (datetime.date) or None (cert does not expire).
+
+    Returns the sentinel string ``"unknown"`` when no rule matches and inference
+    is not possible — callers should propagate this distinction to the LLM.
+    """
+    import datetime
+
+    if issue_date is None:
+        return "unknown"
+
+    haystack = f"{cert_name} {vendor}".lower()
+
+    for keyword, months in _CERT_VALIDITY:
+        if keyword in haystack:
+            if months is None:
+                return None  # does not expire
+            # dateutil not guaranteed; use manual month arithmetic
+            if isinstance(issue_date, (datetime.date, datetime.datetime)):
+                base = issue_date if isinstance(issue_date, datetime.date) else issue_date.date()
+            else:
+                try:
+                    base = datetime.date.fromisoformat(str(issue_date)[:10])
+                except ValueError:
+                    return "unknown"
+            # Add months manually to avoid dateutil dependency
+            month = base.month + months
+            year = base.year + (month - 1) // 12
+            month = (month - 1) % 12 + 1
+            try:
+                return datetime.date(year, month, base.day)
+            except ValueError:
+                # Handle e.g. Feb 29 → Feb 28
+                return datetime.date(year, month, 28)
+
+    return "unknown"  # no rule matched
 
 
 def _tool_search_certifications(
@@ -408,8 +543,23 @@ def _sql_search_certifications(
     employee_name: str | None,
     status: str,
 ) -> list[dict]:
+    # Words that describe intent but don't identify a specific cert or vendor.
+    # When the query is made up entirely of these, skip keyword filtering so
+    # the tool returns ALL certs matching the status/employee filters — not a
+    # random subset that happens to contain those words in a cert name.
+    _GENERIC_TOKENS = {
+        "all", "any", "expired", "expiring", "active", "certification",
+        "certifications", "certificacao", "certificacoes", "certificate",
+        "certificates", "list", "show", "give", "get", "find", "search",
+        "employee", "employees", "colaborador", "colaboradores", "todas",
+        "todos", "vencidas", "vencidos", "validade", "status", "with", "has",
+        "that", "are", "the", "and", "for", "por", "com", "que", "dos", "das",
+    }
+
     norm = normalize_text(query)
-    tokens = [t for t in norm.split() if len(t) >= 3][:6]
+    raw_tokens = [t for t in norm.split() if len(t) >= 3][:6]
+    # Only use tokens that are likely cert/vendor/tech names, not generic words
+    tokens = [t for t in raw_tokens if t not in _GENERIC_TOKENS]
 
     where_parts: list[str] = []
     params: list[Any] = []
@@ -448,16 +598,32 @@ def _sql_search_certifications(
     """
     if where_parts:
         sql += " where " + " and ".join(where_parts)
-    sql += " order by e.full_name, c.expiry_date nulls last limit 50"
+    sql += " order by e.full_name, c.expiry_date nulls last limit 200"
 
     try:
         with get_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(sql, params)
-                return [dict(row) for row in cur.fetchall()]
+                rows = [dict(row) for row in cur.fetchall()]
     except Exception:
         logger.exception("Agent: _sql_search_certifications failed")
         return []
+
+    # Enrich rows that have no expiry_date with an inferred estimate
+    for row in rows:
+        if row.get("expiry_date") is None and row.get("issue_date") is not None:
+            inferred = _infer_expiry_date(
+                row.get("certification_name", ""),
+                row.get("vendor", ""),
+                row["issue_date"],
+            )
+            row["inferred_expiry_date"] = inferred  # None means "does not expire"
+            row["expiry_date_is_inferred"] = inferred is not None
+        else:
+            row["inferred_expiry_date"] = None
+            row["expiry_date_is_inferred"] = False
+
+    return rows
 
 
 def _tool_search_experience(
@@ -560,6 +726,44 @@ def _tool_list_employees() -> dict:
         return {"employees": [], "total": 0}
 
 
+def _tool_get_employee_cv_link(employee_name: str) -> dict:
+    """Return SharePoint URLs for a specific employee's CV documents."""
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT e.full_name, sd.original_filename, sd.sharepoint_web_url
+                FROM source_documents sd
+                JOIN employees e ON sd.employee_id = e.employee_id
+                WHERE e.full_name ILIKE %s
+                  AND sd.sharepoint_web_url IS NOT NULL
+                ORDER BY sd.created_at DESC
+                """,
+                (f"%{employee_name}%",),
+            )
+            rows = cur.fetchall()
+
+    if rows:
+        return {
+            "found": True,
+            "documents": [
+                {
+                    "employee": r["full_name"],
+                    "filename": r["original_filename"],
+                    "url": r["sharepoint_web_url"],
+                }
+                for r in rows
+            ],
+        }
+    return {
+        "found": False,
+        "message": (
+            f"No SharePoint CV link found for '{employee_name}'. "
+            "The document may not have been ingested from SharePoint yet."
+        ),
+    }
+
+
 def _tool_search_web(query: str) -> dict:
     url = "https://api.duckduckgo.com/"
     params = {"q": query, "format": "json", "no_redirect": 1, "skip_disambig": 1}
@@ -592,18 +796,25 @@ def _tool_search_web(query: str) -> dict:
 
 
 def _detect_language(query: str, prior: ConversationState | None) -> str:
-    if prior:
-        return prior.language
     norm = normalize_text(query)
     pt_score = sum(
-        1 for m in {"quem", "tem", "qual", "quais", "certificacoes", "experiencia", "colaborador", "ola", "obrigado"}
+        1 for m in {"quem", "tem", "qual", "quais", "certificacoes", "experiencia",
+                    "colaborador", "ola", "obrigado", "inclua", "incluir", "pessoas",
+                    "vencidas", "vencer", "perto", "mostra", "mostrar", "lista", "quero"}
         if m in norm
     )
     en_score = sum(
-        1 for m in {"who", "has", "which", "what", "certifications", "experience", "employee", "hello", "thanks"}
+        1 for m in {"who", "has", "which", "what", "certifications", "experience",
+                    "employee", "hello", "thanks", "include", "show", "list", "expired",
+                    "expiring", "soon", "find", "search"}
         if m in norm
     )
-    return "pt" if pt_score > en_score else "en"
+    if pt_score > en_score:
+        return "pt"
+    if en_score > pt_score:
+        return "en"
+    # Ambiguous — keep prior language if available, else default to "en"
+    return prior.language if prior else "en"
 
 
 def _no_llm_fallback(language: str) -> str:

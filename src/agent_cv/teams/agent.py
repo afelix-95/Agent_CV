@@ -53,6 +53,8 @@ class GraphPollingBot:
         self._bot_user_id: str | None = None
         # Tracks when presence was last refreshed (monotonic seconds)
         self._last_presence_set: float = 0.0
+        # chat IDs for which acceptance has succeeded (survives across message polling)
+        self._accepted_chats: set[str] = set()
 
     # ------------------------------------------------------------------ #
     # Lifecycle                                                            #
@@ -104,7 +106,7 @@ class GraphPollingBot:
         if self._bot_user_id is None:
             me = await client.me.get()
             self._bot_user_id = me.id
-            logger.debug("Graph bot resolved user ID: %s", self._bot_user_id)
+            logger.info("Graph bot resolved user ID: %s", self._bot_user_id)
 
         # Keep the service account's Teams presence as Available
         now = time.monotonic()
@@ -112,10 +114,112 @@ class GraphPollingBot:
             await self._set_presence_available()
             self._last_presence_set = now
 
-        chats_page = await client.me.chats.get()
-        for chat in chats_page.value or []:
-            if chat.id:
-                await self._process_chat(client, chat.id)
+        import httpx
+
+        # Use httpx directly so we can pass includeHiddenChats=true — the SDK
+        # does not expose this parameter and omitting it hides pending external chats.
+        token = await asyncio.to_thread(get_access_token)
+        async with httpx.AsyncClient(timeout=15.0) as http:
+            resp = await http.get(
+                "https://graph.microsoft.com/v1.0/me/chats",
+                params={"includeHiddenChats": "true", "$top": "50"},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+        if resp.status_code != 200:
+            logger.warning("Graph bot: GET /me/chats returned HTTP %s: %s", resp.status_code, resp.text[:200])
+            return
+        chats = resp.json().get("value", [])
+        for chat in chats:
+            chat_id = chat.get("id")
+            if chat_id:
+                await self._process_chat(client, chat_id)
+
+    async def _accept_chat(self, chat_id: str) -> bool:
+        """Accept a pending external/federated chat so the conversation stays open.
+
+        Federated (cross-tenant) chats land in a hidden/pending state until the
+        recipient explicitly accepts them.  POST /chats/{id}/unhideForUser is the
+        correct Graph endpoint for this; it unhides the chat for the given user and
+        clears the "needs to accept" block seen by the external sender.
+
+        Returns True if the chat was successfully accepted, False otherwise
+        (caller will retry on the next tick).
+
+        Requires Chat.ReadWrite delegated permission (already needed for reading messages).
+        """
+        import httpx
+
+        if not self._bot_user_id:
+            logger.warning("Graph bot: _accept_chat skipped — bot user ID not yet resolved")
+            return False
+
+        logger.info("Graph bot: calling unhideForUser on %s", chat_id)
+        try:
+            token = await asyncio.to_thread(get_access_token)
+            async with httpx.AsyncClient(timeout=10.0) as http:
+                resp = await http.post(
+                    f"https://graph.microsoft.com/v1.0/chats/{chat_id}/unhideForUser",
+                    headers={
+                        "Authorization": f"Bearer {token}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "user": {
+                            "@odata.type": "#microsoft.graph.teamworkUserIdentity",
+                            "id": self._bot_user_id,
+                            "tenantId": settings.teams_bot_tenant_id,
+                        }
+                    },
+                )
+            if resp.status_code in (200, 204):
+                logger.info("Graph bot: accepted (unhid) chat %s", chat_id)
+                return True
+            else:
+                logger.warning(
+                    "Graph bot: unhideForUser returned HTTP %s for %s: %s",
+                    resp.status_code,
+                    chat_id,
+                    resp.text[:300],
+                )
+                return False
+        except Exception:
+            logger.exception("Graph bot: failed to accept chat %s", chat_id)
+            return False
+
+    async def _send_greeting(self, token: str, chat_id: str) -> None:
+        """Send an initial greeting message to unblock the external sender.
+
+        For federated cross-tenant chats, sending a message from the bot's side
+        is what fully completes the acceptance handshake and allows the external
+        user to reply freely in their Teams client.
+        """
+        import httpx
+
+        greeting = (
+            "Hello! I'm the CV Finder assistant. "
+            "Ask me to search for employees by certification, skill, or technology."
+        )
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as http:
+                resp = await http.post(
+                    f"https://graph.microsoft.com/v1.0/chats/{chat_id}/messages",
+                    headers={
+                        "Authorization": f"Bearer {token}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "body": {"contentType": "text", "content": greeting}
+                    },
+                )
+            if resp.status_code in (200, 201):
+                logger.info("Graph bot: sent greeting to %s", chat_id)
+            else:
+                logger.warning(
+                    "Graph bot: greeting failed HTTP %s for %s: %s",
+                    resp.status_code, chat_id, resp.text[:200],
+                )
+        except Exception:
+            logger.exception("Graph bot: failed to send greeting to %s", chat_id)
 
     async def _set_presence_available(self) -> None:
         """Set the bot service account's Teams presence to Available.
@@ -165,8 +269,14 @@ class GraphPollingBot:
             MessagesRequestBuilder,
         )
 
+        # Track accepted chats separately from seen message IDs so that a failed
+        # accept attempt is retried on the next tick (unlike _seen which persists).
         if chat_id not in self._seen:
             self._seen[chat_id] = set()
+        if chat_id not in self._accepted_chats:
+            accepted = await self._accept_chat(chat_id)
+            if accepted:
+                self._accepted_chats.add(chat_id)
 
         query_params = MessagesRequestBuilder.MessagesRequestBuilderGetQueryParameters(
             top=50,
@@ -299,14 +409,67 @@ def get_graph_bot() -> GraphPollingBot:
 # Helpers                                                             #
 # ------------------------------------------------------------------ #
 
+def _is_table_row(line: str) -> bool:
+    s = line.strip()
+    return s.startswith("|") and s.endswith("|") and s.count("|") >= 2
+
+
+def _is_separator_row(line: str) -> bool:
+    """Matches markdown table separator rows like |---|---|"""
+    import re
+    return bool(re.fullmatch(r"[\|\s\-:]+", line.strip()))
+
+
+def _parse_table(lines: list[str]) -> str:
+    """Convert a list of markdown pipe-table lines into an HTML table."""
+    html_rows: list[str] = []
+    header_done = False
+    for raw in lines:
+        stripped = raw.strip()
+        if _is_separator_row(stripped) and not stripped.replace("|", "").replace("-", "").replace(":", "").replace(" ", ""):
+            # This is the separator row — marks end of header
+            header_done = True
+            continue
+        cells = [c.strip() for c in stripped.strip("|").split("|")]
+        if not header_done:
+            tag = "th"
+        else:
+            tag = "td"
+        row_html = "".join(f"<{tag}>{_html.escape(c)}</{tag}>" for c in cells)
+        html_rows.append(f"<tr>{row_html}</tr>")
+    return (
+        '<table style="border-collapse:collapse;width:100%;">'
+        + "".join(html_rows)
+        + "</table>"
+    )
+
+
 def _text_to_html(text: str) -> str:
-    """Convert LLM plain-text output (• bullets + newlines) to Teams-compatible HTML."""
+    """Convert LLM plain-text output (bullets, tables, newlines) to Teams-compatible HTML."""
     lines = text.split("\n")
     parts: list[str] = []
     in_list = False
+    table_buf: list[str] = []
+
+    def flush_table() -> None:
+        if table_buf:
+            parts.append(_parse_table(table_buf))
+            table_buf.clear()
 
     for line in lines:
         stripped = line.strip()
+
+        # Accumulate markdown pipe-table rows
+        if _is_table_row(stripped):
+            if in_list:
+                parts.append("</ul>")
+                in_list = False
+            table_buf.append(stripped)
+            continue
+
+        # Non-table line — flush any buffered table first
+        flush_table()
+
         if stripped.startswith("•"):
             if not in_list:
                 parts.append("<ul>")
@@ -319,6 +482,7 @@ def _text_to_html(text: str) -> str:
             if stripped:
                 parts.append(f"<p>{_html.escape(stripped)}</p>")
 
+    flush_table()
     if in_list:
         parts.append("</ul>")
 
