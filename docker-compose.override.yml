@@ -1,0 +1,6 @@
+# Local development override — builds the image from source instead of pulling
+# from the registry. Docker Compose applies this automatically when present.
+# Do NOT commit server-specific .env changes here.
+services:
+  app:
+    build: .

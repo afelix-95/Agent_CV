@@ -1,0 +1,39 @@
+services:
+
+  # ── PostgreSQL with pgvector ─────────────────────────────────────────────────
+  db:
+    image: pgvector/pgvector:pg17
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres        # override in .env on the server
+      POSTGRES_DB: agent_cv
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      # SQL files are executed in alphabetical order on first run
+      - ./sql:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d agent_cv"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── FastAPI application ──────────────────────────────────────────────────────
+  app:
+    image: amaia95/agents:latest
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # Override DSN so it points to the db service, not localhost
+      POSTGRES_DSN: postgresql://postgres:postgres@db:5432/agent_cv
+    ports:
+      - "8000:8000"
+    volumes:
+      # Mount the CV PDF folder from the host so files persist across deploys
+      - ./PDFs:/app/PDFs
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  pg_data:

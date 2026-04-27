@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
+from agent_cv import __version__
 from agent_cv.api.routes import router
 from agent_cv.ingestion.sharepoint_watcher import get_sharepoint_watcher, sharepoint_configured
 from agent_cv.services.graph_service import graph_configured
@@ -26,5 +27,5 @@ async def lifespan(app: FastAPI):
         await get_sharepoint_watcher().stop()
 
 
-app = FastAPI(title="Agent CV Service", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="Agent CV Service", version=__version__, lifespan=lifespan)
 app.include_router(router)
