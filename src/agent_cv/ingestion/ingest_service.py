@@ -80,53 +80,52 @@ def ingest_documents(
     }
 
 
-# TODO: SharePoint integration is pending Drive ID permissions — re-enable when available.
-# def ingest_sharepoint_file(
-#     filename: str,
-#     content: bytes,
-#     sharepoint_item_id: str,
-#     sharepoint_web_url: str,
-# ) -> dict[str, int]:
-#     """Ingest a single file downloaded from SharePoint.
-#
-#     Writes the content to a temporary file, runs it through the normal ingestion
-#     pipeline, then removes the temp file.  The ``sharepoint_item_id`` and
-#     ``sharepoint_web_url`` are persisted on the ``source_documents`` row so the
-#     agent can later share the link in Teams.
-#     """
-#     import tempfile
-#
-#     logical_path = Path(filename)
-#     suffix = logical_path.suffix.lower()
-#     if suffix not in SUPPORTED:
-#         return {"inserted": 0, "skipped": 1, "scanned": 1, "reingested": 0}
-#
-#     with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
-#         tmp.write(content)
-#         tmp_path = Path(tmp.name)
-#
-#     try:
-#         with get_connection() as conn:
-#             with conn.cursor() as cur:
-#                 inserted = _ingest_one_file(
-#                     cur,
-#                     actual_path=tmp_path,
-#                     logical_path=logical_path,
-#                     source_system="sharepoint",
-#                     source_path=sharepoint_item_id,
-#                     sharepoint_item_id=sharepoint_item_id,
-#                     sharepoint_web_url=sharepoint_web_url,
-#                 )
-#             conn.commit()
-#
-#         return {
-#             "inserted": 1 if inserted else 0,
-#             "skipped": 0 if inserted else 1,
-#             "scanned": 1,
-#             "reingested": 0,
-#         }
-#     finally:
-#         tmp_path.unlink(missing_ok=True)
+def ingest_sharepoint_file(
+    filename: str,
+    content: bytes,
+    sharepoint_item_id: str,
+    sharepoint_web_url: str,
+) -> dict[str, int]:
+    """Ingest a single file downloaded from SharePoint.
+
+    Writes the content to a temporary file, runs it through the normal ingestion
+    pipeline, then removes the temp file.  The ``sharepoint_item_id`` and
+    ``sharepoint_web_url`` are persisted on the ``source_documents`` row so the
+    agent can later share the link in Teams.
+    """
+    import tempfile
+
+    logical_path = Path(filename)
+    suffix = logical_path.suffix.lower()
+    if suffix not in SUPPORTED:
+        return {"inserted": 0, "skipped": 1, "scanned": 1, "reingested": 0}
+
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+        tmp.write(content)
+        tmp_path = Path(tmp.name)
+
+    try:
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                inserted = _ingest_one_file(
+                    cur,
+                    actual_path=tmp_path,
+                    logical_path=logical_path,
+                    source_system="sharepoint",
+                    source_path=sharepoint_item_id,
+                    sharepoint_item_id=sharepoint_item_id,
+                    sharepoint_web_url=sharepoint_web_url,
+                )
+            conn.commit()
+
+        return {
+            "inserted": 1 if inserted else 0,
+            "skipped": 0 if inserted else 1,
+            "scanned": 1,
+            "reingested": 0,
+        }
+    finally:
+        tmp_path.unlink(missing_ok=True)
 
 
 def _ingest_one_file(
@@ -135,6 +134,8 @@ def _ingest_one_file(
     logical_path: Path,
     source_system: str,
     source_path: str,
+    sharepoint_item_id: str | None = None,
+    sharepoint_web_url: str | None = None,
 ) -> bool:
     """Insert a single file into the database.
 
@@ -146,7 +147,21 @@ def _ingest_one_file(
     digest = _hash_file(actual_path)
 
     cur.execute("select document_id from source_documents where sha256_hash = %s", (digest,))
-    if cur.fetchone():
+    existing = cur.fetchone()
+    if existing:
+        # Document content already ingested — but if this call comes from SharePoint,
+        # backfill the SharePoint fields so get_employee_cv_link can return the URL.
+        if sharepoint_item_id or sharepoint_web_url:
+            cur.execute(
+                """
+                update source_documents
+                   set sharepoint_item_id = coalesce(sharepoint_item_id, %s),
+                       sharepoint_web_url  = coalesce(sharepoint_web_url,  %s)
+                 where document_id = %s
+                   and (sharepoint_item_id is null or sharepoint_web_url is null)
+                """,
+                (sharepoint_item_id, sharepoint_web_url, existing["document_id"]),
+            )
         return False
 
     parsed = parse_file_name(logical_path)
@@ -169,8 +184,9 @@ def _ingest_one_file(
         """
         insert into source_documents (
             employee_id, source_system, source_path, original_filename,
-            mime_type, sha256_hash, detected_language, ingest_status
-        ) values (%s, %s, %s, %s, %s, %s, %s, %s)
+            mime_type, sha256_hash, detected_language, ingest_status,
+            sharepoint_item_id, sharepoint_web_url
+        ) values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         returning document_id
         """,
         (
@@ -182,6 +198,8 @@ def _ingest_one_file(
             digest,
             detected_language,
             "ingested",
+            sharepoint_item_id,
+            sharepoint_web_url,
         ),
     )
     doc = cur.fetchone()
