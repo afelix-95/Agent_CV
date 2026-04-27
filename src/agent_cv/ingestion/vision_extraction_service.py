@@ -166,13 +166,17 @@ def extract_all_certificates_from_pdf(pdf_path: str, is_transcript: bool = False
     try:
         full_text = _extract_pdf_text(pdf_path)
 
-        # Prefer deterministic text parsing for transcript PDFs with selectable text.
+        # For transcript PDFs with selectable text, deterministic text parsing is faster
+        # and more reliable than vision — the table structure maps directly to regex patterns.
         if full_text.strip() and is_transcript:
             parsed_from_text = parse_transcript_text_generic(full_text, vendor_hint=vendor_hint)
             if parsed_from_text:
                 return parsed_from_text
 
-        # Fallback path for scanned/image PDFs or non-transcript docs.
+        # For single-certificate PDFs, use vision as the primary extraction method.
+        # Vision handles both text-based and scanned (image-only) PDFs uniformly and
+        # is more reliable for structured visual documents (logos, layout, signatures).
+        # If the PDF has no selectable text (scanned), pdf_to_images still works via PyMuPDF.
         images = pdf_to_images(pdf_path)
         for page_num, img_bytes in enumerate(images):
             certificates = extract_certificates_from_image(
@@ -454,16 +458,25 @@ def _normalize_issuer(certs: list[dict], context: str) -> list[dict]:
     ctx = (context or "").lower()
     for cert in certs:
         item = dict(cert)
-        name = str(item.get("name") or "")
+        name_lower = str(item.get("name") or "").lower()
         issuer = str(item.get("issuer") or "").strip()
-        if not issuer:
-            if "cisco" in ctx or "cisco" in name.lower():
-                issuer = "Cisco"
-            elif "red hat" in ctx or "redhat" in ctx or "red hat" in name.lower():
-                issuer = "Red Hat"
-            elif "microsoft" in ctx or "microsoft" in name.lower():
-                issuer = "Microsoft"
-        if issuer:
+
+        # Derive issuer from strong, unambiguous signals in the cert name and context.
+        # These override whatever the model returned to correct misidentifications.
+        derived: str | None = None
+        if (
+            "red hat" in name_lower or "rhcsa" in name_lower or "rhce" in name_lower
+            or "red hat" in ctx or "redhat" in ctx or "rhcsa" in ctx or "rhce" in ctx
+        ):
+            derived = "Red Hat"
+        elif "microsoft" in name_lower or "azure" in name_lower or "microsoft" in ctx:
+            derived = "Microsoft"
+        elif "cisco" in name_lower or "cisco" in ctx:
+            derived = "Cisco"
+
+        if derived:
+            item["issuer"] = derived
+        elif issuer:
             item["issuer"] = issuer
         normalized.append(item)
     return normalized
@@ -552,7 +565,8 @@ def _extract_table_text_from_images(images: list[bytes], vendor_hint: str = "") 
 
 
 def _infer_vendor_hint(text: str) -> str:
-    t = (text or "").lower()
+    # Normalize separators so "Red_Hat" and "Red-Hat" match the same as "Red Hat".
+    t = re.sub(r"[_\-]", " ", (text or "").lower())
     if "microsoft" in t or "learn" in t:
         return "Microsoft"
     if "cisco" in t:

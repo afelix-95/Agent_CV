@@ -80,52 +80,53 @@ def ingest_documents(
     }
 
 
-def ingest_sharepoint_file(
-    filename: str,
-    content: bytes,
-    sharepoint_item_id: str,
-    sharepoint_web_url: str,
-) -> dict[str, int]:
-    """Ingest a single file downloaded from SharePoint.
-
-    Writes the content to a temporary file, runs it through the normal ingestion
-    pipeline, then removes the temp file.  The ``sharepoint_item_id`` and
-    ``sharepoint_web_url`` are persisted on the ``source_documents`` row so the
-    agent can later share the link in Teams.
-    """
-    import tempfile
-
-    logical_path = Path(filename)
-    suffix = logical_path.suffix.lower()
-    if suffix not in SUPPORTED:
-        return {"inserted": 0, "skipped": 1, "scanned": 1, "reingested": 0}
-
-    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
-        tmp.write(content)
-        tmp_path = Path(tmp.name)
-
-    try:
-        with get_connection() as conn:
-            with conn.cursor() as cur:
-                inserted = _ingest_one_file(
-                    cur,
-                    actual_path=tmp_path,
-                    logical_path=logical_path,
-                    source_system="sharepoint",
-                    source_path=sharepoint_item_id,
-                    sharepoint_item_id=sharepoint_item_id,
-                    sharepoint_web_url=sharepoint_web_url,
-                )
-            conn.commit()
-
-        return {
-            "inserted": 1 if inserted else 0,
-            "skipped": 0 if inserted else 1,
-            "scanned": 1,
-            "reingested": 0,
-        }
-    finally:
-        tmp_path.unlink(missing_ok=True)
+# TODO: SharePoint integration is pending Drive ID permissions — re-enable when available.
+# def ingest_sharepoint_file(
+#     filename: str,
+#     content: bytes,
+#     sharepoint_item_id: str,
+#     sharepoint_web_url: str,
+# ) -> dict[str, int]:
+#     """Ingest a single file downloaded from SharePoint.
+#
+#     Writes the content to a temporary file, runs it through the normal ingestion
+#     pipeline, then removes the temp file.  The ``sharepoint_item_id`` and
+#     ``sharepoint_web_url`` are persisted on the ``source_documents`` row so the
+#     agent can later share the link in Teams.
+#     """
+#     import tempfile
+#
+#     logical_path = Path(filename)
+#     suffix = logical_path.suffix.lower()
+#     if suffix not in SUPPORTED:
+#         return {"inserted": 0, "skipped": 1, "scanned": 1, "reingested": 0}
+#
+#     with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+#         tmp.write(content)
+#         tmp_path = Path(tmp.name)
+#
+#     try:
+#         with get_connection() as conn:
+#             with conn.cursor() as cur:
+#                 inserted = _ingest_one_file(
+#                     cur,
+#                     actual_path=tmp_path,
+#                     logical_path=logical_path,
+#                     source_system="sharepoint",
+#                     source_path=sharepoint_item_id,
+#                     sharepoint_item_id=sharepoint_item_id,
+#                     sharepoint_web_url=sharepoint_web_url,
+#                 )
+#             conn.commit()
+#
+#         return {
+#             "inserted": 1 if inserted else 0,
+#             "skipped": 0 if inserted else 1,
+#             "scanned": 1,
+#             "reingested": 0,
+#         }
+#     finally:
+#         tmp_path.unlink(missing_ok=True)
 
 
 def _ingest_one_file(
@@ -134,8 +135,6 @@ def _ingest_one_file(
     logical_path: Path,
     source_system: str,
     source_path: str,
-    sharepoint_item_id: str | None = None,
-    sharepoint_web_url: str | None = None,
 ) -> bool:
     """Insert a single file into the database.
 
@@ -170,9 +169,8 @@ def _ingest_one_file(
         """
         insert into source_documents (
             employee_id, source_system, source_path, original_filename,
-            mime_type, sha256_hash, detected_language, ingest_status,
-            sharepoint_item_id, sharepoint_web_url
-        ) values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            mime_type, sha256_hash, detected_language, ingest_status
+        ) values (%s, %s, %s, %s, %s, %s, %s, %s)
         returning document_id
         """,
         (
@@ -184,8 +182,6 @@ def _ingest_one_file(
             digest,
             detected_language,
             "ingested",
-            sharepoint_item_id,
-            sharepoint_web_url,
         ),
     )
     doc = cur.fetchone()
@@ -218,13 +214,15 @@ def _ingest_one_file(
         is_transcript = detect_is_transcript(logical_path.name)
         vision_certs = []
 
-        if is_transcript or (text and len(text.strip()) < 500):
-            try:
-                vision_certs = extract_all_certificates_from_pdf(
-                    str(actual_path), is_transcript=is_transcript
-                )
-            except Exception:
-                vision_certs = []
+        # Always attempt vision extraction for certificate documents — relying only
+        # on filename parsing misses dates and can mis-identify the vendor when the
+        # PDF contains selectable text but no structured fields.
+        try:
+            vision_certs = extract_all_certificates_from_pdf(
+                str(actual_path), is_transcript=is_transcript
+            )
+        except Exception:
+            vision_certs = []
 
         if vision_certs:
             _store_extracted_certificates(
@@ -305,7 +303,9 @@ def _store_cert_chunks(cur, certification_id: str, document_version_id: str, tex
 def _store_single_certification(
     cur, employee_id: str, document_version_id: str, parsed, text: str, language_code: str = "en"
 ) -> None:
-    """Store a single certification from filename parsing."""
+    """Store a single certification using only filename-derived metadata (employee name, title, vendor).
+    Dates are never inferred from the filename — they will remain NULL unless vision extraction
+    was able to read them from the document content."""
     cur.execute(
         """
         insert into certifications (
@@ -317,9 +317,9 @@ def _store_single_certification(
             employee_id,
             document_version_id,
             parsed.title,
-            parsed.issue_date,
-            parsed.expiry_date,
-            _compute_status(parsed.expiry_date),
+            None,
+            None,
+            "unknown",
             language_code,
             0.60,
         ),

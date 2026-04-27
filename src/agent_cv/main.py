@@ -5,7 +5,8 @@ from fastapi import FastAPI
 
 from agent_cv import __version__
 from agent_cv.api.routes import router
-from agent_cv.ingestion.sharepoint_watcher import get_sharepoint_watcher, sharepoint_configured
+# TODO: SharePoint integration is pending Drive ID permissions — re-enable when available.
+# from agent_cv.ingestion.sharepoint_watcher import get_sharepoint_watcher, sharepoint_configured
 from agent_cv.services.graph_service import graph_configured
 from agent_cv.teams.agent import get_graph_bot
 
@@ -19,12 +20,12 @@ logging.getLogger("agent_cv").setLevel(logging.DEBUG)
 async def lifespan(app: FastAPI):
     if graph_configured():
         get_graph_bot().start()
-    if sharepoint_configured():
-        get_sharepoint_watcher().start()
+    # if sharepoint_configured():
+    #     get_sharepoint_watcher().start()
     yield
     await get_graph_bot().stop()
-    if sharepoint_configured():
-        await get_sharepoint_watcher().stop()
+    # if sharepoint_configured():
+    #     await get_sharepoint_watcher().stop()
 
 
 app = FastAPI(title="Agent CV Service", version=__version__, lifespan=lifespan)
