@@ -106,26 +106,7 @@ TOOLS: list[dict] = [
             "parameters": {"type": "object", "properties": {}, "required": []},
         },
     },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_employee_cv_link",
-            "description": (
-                "Get the SharePoint link to an employee's CV document. "
-                "Use when the user asks to see, open, or share a specific employee's CV."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "employee_name": {
-                        "type": "string",
-                        "description": "Full or partial name of the employee",
-                    }
-                },
-                "required": ["employee_name"],
-            },
-        },
-    },
+    # TODO: get_employee_cv_link is disabled until SharePoint Drive ID permissions are granted.
     {
         "type": "function",
         "function": {
@@ -162,7 +143,6 @@ TOOLS AVAILABLE:
 • search_experience — search employee CVs for work experience and skills
 • get_employee_profile — retrieve the full profile for a specific employee
 • list_employees — list all employees in the system
-• get_employee_cv_link — get the SharePoint link to an employee's CV document
 • search_web — look up external information about certifications or technologies
 
 HOW TO RESPOND:
@@ -171,14 +151,17 @@ HOW TO RESPOND:
 3. For broad topics like "cybersecurity" or "cloud", search BOTH certifications AND experience
 4. Respond in the SAME LANGUAGE as the user's message
 5. Write in a conversational, helpful tone — like a knowledgeable colleague
-6. Use bullet points (•) to list employees or certifications; avoid markdown bold/italic
+6. FORMATTING — structure your replies clearly:
+   - Group results by employee: use the employee name as a header (e.g. "**Name**") followed by their details indented below
+   - Use a sub-bullet (  -) for each certification or detail under an employee
+   - Include vendor, issue date, expiry date, and status for each certification when available
+   - Separate each employee block with a blank line
 7. Be specific: list names and certification titles when found; avoid unnecessary hedging
-8. End your reply with 1-2 relevant follow-up suggestions the user might find useful
+8. End your reply with 1-2 relevant follow-up suggestions the user might find useful — keep them concise
 9. If tools return no data, say clearly what you searched for and suggest alternatives
 10. ALWAYS write exclusively in Latin script — never output characters from Georgian, Arabic, Cyrillic, Greek, or any other non-Latin alphabet, even as abbreviations or parenthetical notes
-11. When the user asks to see or share an employee's CV, call get_employee_cv_link and include the returned URL as a plain hyperlink in your reply
-12. When answering questions about expired or expiring certifications, ALWAYS call search_certifications with status="any" — never pre-filter to "expired" or "expiring" in the tool call. Filter and categorise in your answer instead, to avoid incomplete results.
-13. Certification results include an "inferred_expiry_date" field for records where the expiry date was not registered. If this field is a date (not null or "unknown"), use it as an estimated expiry and clearly label it as "estimated" or "inferred" in your answer. If it is null, the cert does not expire. If it is "unknown", you cannot infer an expiry date for that record.
+11. When answering questions about expired or expiring certifications, ALWAYS call search_certifications with status="any" — never pre-filter to "expired" or "expiring" in the tool call. Filter and categorise in your answer instead, to avoid incomplete results.
+12. Certification results include an "inferred_expiry_date" field for records where the expiry date was not registered. If this field is a date (not null or "unknown"), use it as an estimated expiry and clearly label it as "estimated" or "inferred" in your answer. If it is null, the cert does not expire. If it is "unknown", you cannot infer an expiry date for that record.
 """
 
 _SYSTEM_PROMPT_PT = """\
@@ -191,7 +174,6 @@ FERRAMENTAS DISPONÍVEIS:
 • search_experience — pesquisar CVs por experiência profissional e competências
 • get_employee_profile — obter o perfil completo de um colaborador específico
 • list_employees — listar todos os colaboradores no sistema
-• get_employee_cv_link — obter o link do SharePoint para o CV de um colaborador
 • search_web — pesquisar informação externa sobre certificações ou tecnologias
 
 COMO RESPONDER:
@@ -200,14 +182,17 @@ COMO RESPONDER:
 3. Para tópicos amplos como "cibersegurança" ou "cloud", pesquisa TANTO em certificações COMO em experiência
 4. Responde sempre no MESMO IDIOMA da mensagem do utilizador
 5. Escreve num tom conversacional e útil — como um colega experiente
-6. Usa marcadores (•) para listar colaboradores ou certificações; evita negrito/itálico markdown
+6. FORMATAÇÃO — estrutura as respostas de forma clara:
+   - Agrupa os resultados por colaborador: usa o nome como cabeçalho (ex: "**Nome**") seguido dos detalhes indentados
+   - Usa um sub-marcador (  -) para cada certificação ou detalhe de um colaborador
+   - Inclui fornecedor, data de emissão, validade e estado de cada certificação quando disponível
+   - Separa cada bloco de colaborador com uma linha em branco
 7. Sê específico: lista nomes e títulos de certificações quando encontrados; não sejas desnecessariamente cauteloso
-8. Termina a resposta com 1-2 sugestões de perguntas de seguimento relevantes
+8. Termina a resposta com 1-2 sugestões de perguntas de seguimento relevantes — mantém-nas concisas
 9. Se as ferramentas não retornarem dados, diz claramente o que pesquisaste e sugere alternativas
 10. Escreve SEMPRE exclusivamente em alfabeto latino — nunca uses caracteres do alfabeto georgiano, árabe, cirílico, grego ou qualquer outro alfabeto não-latino, mesmo em abreviaturas ou notas
-11. Quando o utilizador pedir para ver ou partilhar o CV de um colaborador, usa get_employee_cv_link e inclui o URL retornado como hiperligação na tua resposta
-12. Quando responderes a perguntas sobre certificações vencidas ou a vencer, usa SEMPRE search_certifications com status="any" — nunca pré-filtres para "expired" ou "expiring" na chamada da ferramenta. Filtra e categoriza na tua resposta, para evitar resultados incompletos.
-13. Os resultados de certificações incluem um campo "inferred_expiry_date" para registos em que a data de validade não foi registada. Se este campo contiver uma data (não nulo nem "unknown"), usa-a como validade estimada e indica claramente que é uma estimativa na tua resposta. Se for nulo, a certificação não expira. Se for "unknown", não é possível inferir a data de validade desse registo.
+11. Quando responderes a perguntas sobre certificações vencidas ou a vencer, usa SEMPRE search_certifications com status="any" — nunca pré-filtres para "expired" ou "expiring" na chamada da ferramenta. Filtra e categoriza na tua resposta, para evitar resultados incompletos.
+12. Os resultados de certificações incluem um campo "inferred_expiry_date" para registos em que a data de validade não foi registada. Se este campo contiver uma data (não nulo nem "unknown"), usa-a como validade estimada e indica claramente que é uma estimativa na tua resposta. Se for nulo, a certificação não expira. Se for "unknown", não é possível inferir a data de validade desse registo.
 """
 
 
@@ -389,8 +374,9 @@ def _dispatch_tool(name: str, args: dict) -> Any:
             return _tool_get_employee_profile(args.get("employee_name", ""))
         if name == "list_employees":
             return _tool_list_employees()
-        if name == "get_employee_cv_link":
-            return _tool_get_employee_cv_link(args.get("employee_name", ""))
+        # TODO: get_employee_cv_link is disabled until SharePoint Drive ID permissions are granted.
+        # if name == "get_employee_cv_link":
+        #     return _tool_get_employee_cv_link(args.get("employee_name", ""))
         if name == "search_web":
             return _tool_search_web(args.get("query", ""))
     except Exception:
