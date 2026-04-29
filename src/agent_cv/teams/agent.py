@@ -82,13 +82,19 @@ class TeamsWebhookBot:
             settings.graph_user_email,
         )
 
-        await self._create_subscription()
-
+        # Schedule subscription creation as a background task so it runs AFTER
+        # uvicorn has started accepting connections.  Graph validates the notification
+        # URL immediately when the subscription is created, so the server must already
+        # be serving requests — which it isn't yet during lifespan startup (before yield).
         renew_interval = _SUBSCRIPTION_LIFETIME_S - _SUBSCRIPTION_RENEW_BEFORE_S
         self._task = asyncio.create_task(
-            self._renewal_loop(renew_interval), name="graph-subscription-renewal"
+            self._startup_then_renewal_loop(renew_interval),
+            name="graph-subscription-renewal",
         )
-        logger.info("Teams webhook bot started (subscription=%s)", self._subscription_id)
+        logger.info(
+            "Teams webhook bot initialised (subscription will be created once server is ready, account=%s)",
+            settings.graph_user_email,
+        )
 
     async def stop(self) -> None:
         if self._task and not self._task.done():
@@ -176,6 +182,22 @@ class TeamsWebhookBot:
             raise RuntimeError(
                 f"Failed to create Graph subscription: HTTP {resp.status_code}: {resp.text[:300]}"
             )
+
+    async def _startup_then_renewal_loop(self, renew_interval: int) -> None:
+        """Create the initial subscription, then keep renewing it.
+
+        Running this as a background task (via asyncio.create_task) ensures it
+        executes only after uvicorn has started accepting connections, which is
+        required because Graph validates the notificationUrl immediately.
+        """
+        try:
+            await self._create_subscription()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Teams webhook bot: failed to create initial subscription")
+            return
+        await self._renewal_loop(renew_interval)
 
     async def _renewal_loop(self, interval: int) -> None:
         while True:
