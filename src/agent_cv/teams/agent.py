@@ -189,14 +189,36 @@ class TeamsWebhookBot:
         Running this as a background task (via asyncio.create_task) ensures it
         executes only after uvicorn has started accepting connections, which is
         required because Graph validates the notificationUrl immediately.
+
+        A short initial delay plus a retry loop handles the race window between
+        the task being scheduled and uvicorn actually serving HTTP requests.
         """
-        try:
-            await self._create_subscription()
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            logger.exception("Teams webhook bot: failed to create initial subscription")
-            return
+        # Give uvicorn a moment to finish starting before Graph validates the URL
+        await asyncio.sleep(5)
+
+        # Retry up to 5 times with increasing back-off in case the server is
+        # still not ready or Traefik hasn't finished routing yet
+        for attempt in range(1, 6):
+            try:
+                await self._create_subscription()
+                break
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                if attempt == 5:
+                    logger.exception(
+                        "Teams webhook bot: failed to create initial subscription after %d attempts",
+                        attempt,
+                    )
+                    return
+                wait = attempt * 10
+                logger.warning(
+                    "Teams webhook bot: subscription creation attempt %d failed, retrying in %ds",
+                    attempt,
+                    wait,
+                )
+                await asyncio.sleep(wait)
+
         await self._renewal_loop(renew_interval)
 
     async def _renewal_loop(self, interval: int) -> None:
