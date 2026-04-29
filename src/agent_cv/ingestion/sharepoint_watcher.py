@@ -189,7 +189,8 @@ class SharePointWatcher:
                     headers=headers,
                 )
                 if resp.status_code != 200:
-                    logger.error(
+                    log = logger.warning if resp.status_code in (401, 403) else logger.error
+                    log(
                         "SharePoint watcher: listing request failed HTTP %s — %s",
                         resp.status_code,
                         resp.text[:300],
