@@ -29,6 +29,9 @@ class Settings(BaseSettings):
     graph_poll_interval: int = 5
 
     # SharePoint document library watcher
+    # Sharing link URL for the folder (e.g. from Share → Copy link in OneDrive/SharePoint).
+    # When set, children are listed via the Graph Shares API which supports cross-tenant access.
+    sharepoint_url: str = ""
     # Drive ID of the SharePoint library to monitor.
     # Find it via GET /me/drive/sharedWithMe -> remoteItem.parentReference.driveId
     sharepoint_drive_id: str = ""
@@ -38,7 +41,7 @@ class Settings(BaseSettings):
     # When set, takes precedence over sharepoint_folder_path.
     sharepoint_folder_item_id: str = ""
     # How often (in seconds) to check the SharePoint library for new files
-    sharepoint_poll_interval: int = 300
+    sharepoint_poll_interval: int = 3600
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 

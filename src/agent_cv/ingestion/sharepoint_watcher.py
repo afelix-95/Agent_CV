@@ -1,27 +1,38 @@
 """SharePoint document library watcher.
 
-Polls a SharePoint drive for new or modified files using the Microsoft Graph
-delta API and ingests them automatically into the Agent CV database.
+Polls a SharePoint folder for new or modified files using the Microsoft Graph
+children listing API and ingests them automatically into the Agent CV database.
 
-The delta link (a resumption token) is persisted in the ``sync_state`` table
-so restarts continue from where the previous run left off rather than
-re-scanning the entire library.
+Cross-tenant shared folders are supported by providing the sharing link URL
+(SHAREPOINT_URL), which causes the watcher to list children via the Graph
+Shares API (``/shares/{encodedUrl}/driveItem/children``).  This avoids the
+delta API which does not support cross-tenant access.
+
+To avoid re-downloading unchanged files, the ``lastModifiedDateTime`` of each
+item is stored in the ``sharepoint_modified_at`` column of ``source_documents``
+and compared on every scan.  Only files whose remote timestamp is newer than
+the stored value are downloaded and re-ingested.
 
 Configuration (all in .env / Settings):
-    SHAREPOINT_DRIVE_ID       — Drive ID for the SharePoint document library.
-                                Find it via Graph Explorer:
-                                GET /me/drives  or  GET /sites/{site-id}/drives
-    SHAREPOINT_FOLDER_PATH    — Optional subfolder (e.g. "CV Repository").
-                                Leave blank to watch the entire drive root.
-    SHAREPOINT_POLL_INTERVAL  — Seconds between delta polls (default 300).
+    SHAREPOINT_URL            — Sharing link URL for the folder (from Share →
+                                Copy link in OneDrive/SharePoint).  Enables
+                                cross-tenant access via the Shares API.
+    SHAREPOINT_DRIVE_ID       — Drive ID of the SharePoint library.  Used as a
+                                fallback when SHAREPOINT_URL is not set.
+    SHAREPOINT_FOLDER_ITEM_ID — Item ID of a specific subfolder (takes
+                                precedence over SHAREPOINT_FOLDER_PATH).
+    SHAREPOINT_FOLDER_PATH    — Subfolder path within the drive root.
+    SHAREPOINT_POLL_INTERVAL  — Seconds between scans (default 3600).
 
 The Entra app registration must have the delegated permission
-``Files.Read.All`` (or ``Sites.Read.All``) consented by the tenant admin.
+``Files.Read.All`` consented by the tenant admin.
 """
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -37,13 +48,18 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_SYNC_KEY = "sharepoint_delta_link"
 _SUPPORTED = {".pdf", ".txt", ".docx"}
+
+
+def _encode_sharing_url(url: str) -> str:
+    """Encode a sharing URL to the base64url token expected by the Graph Shares API."""
+    encoded = base64.urlsafe_b64encode(url.encode()).rstrip(b"=").decode()
+    return f"u!{encoded}"
 
 
 def sharepoint_configured() -> bool:
     """Return True when the minimum SharePoint configuration is present."""
-    return bool(settings.sharepoint_drive_id)
+    return bool(settings.sharepoint_url or settings.sharepoint_drive_id)
 
 
 class SharePointWatcher:
@@ -69,7 +85,7 @@ class SharePointWatcher:
             logger.info(
                 "SharePoint watcher started (interval=%ds, drive=%s, folder=%r)",
                 self._poll_interval,
-                settings.sharepoint_drive_id,
+                settings.sharepoint_url or settings.sharepoint_drive_id,
                 settings.sharepoint_folder_path or "/",
             )
 
@@ -101,35 +117,38 @@ class SharePointWatcher:
             await asyncio.sleep(self._poll_interval)
 
     async def _tick(self) -> None:
-        stored_delta = await asyncio.to_thread(self._load_delta_link)
+        drive = settings.sharepoint_drive_id
+        item_id = settings.sharepoint_folder_item_id.strip()
+        folder = settings.sharepoint_folder_path.strip("/")
+        sharing_url = settings.sharepoint_url.strip()
+        select = "$select=id,name,file,webUrl,lastModifiedDateTime"
 
-        if stored_delta:
-            start_url = stored_delta
+        if sharing_url:
+            encoded = _encode_sharing_url(sharing_url)
+            list_url = (
+                f"https://graph.microsoft.com/v1.0"
+                f"/shares/{encoded}/driveItem/children?{select}"
+            )
+        elif item_id:
+            list_url = (
+                f"https://graph.microsoft.com/v1.0"
+                f"/drives/{drive}/items/{item_id}/children?{select}"
+            )
+        elif folder:
+            list_url = (
+                f"https://graph.microsoft.com/v1.0"
+                f"/drives/{drive}/root:/{folder}:/children?{select}"
+            )
         else:
-            drive = settings.sharepoint_drive_id
-            select = "$select=id,name,file,webUrl,deleted,parentReference"
-            item_id = settings.sharepoint_folder_item_id.strip()
-            folder = settings.sharepoint_folder_path.strip("/")
-            if item_id:
-                # Shared folder referenced by item ID (e.g. from /me/drive/sharedWithMe)
-                start_url = (
-                    f"https://graph.microsoft.com/v1.0"
-                    f"/drives/{drive}/items/{item_id}/delta?{select}"
-                )
-            elif folder:
-                start_url = (
-                    f"https://graph.microsoft.com/v1.0"
-                    f"/drives/{drive}/root:/{folder}:/delta?{select}"
-                )
-            else:
-                start_url = (
-                    f"https://graph.microsoft.com/v1.0"
-                    f"/drives/{drive}/root/delta?{select}"
-                )
+            list_url = (
+                f"https://graph.microsoft.com/v1.0"
+                f"/drives/{drive}/root/children?{select}"
+            )
 
+        known_mtimes = await asyncio.to_thread(self._load_item_mtimes)
         token = await asyncio.to_thread(get_access_token)
-        new_items: list[dict] = []
-        next_url: str | None = start_url
+        to_process: list[dict] = []
+        next_url: str | None = list_url
 
         async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as http:
             while next_url:
@@ -139,36 +158,43 @@ class SharePointWatcher:
                 )
                 if resp.status_code != 200:
                     logger.error(
-                        "SharePoint watcher: delta request failed HTTP %s — %s",
+                        "SharePoint watcher: listing request failed HTTP %s — %s",
                         resp.status_code,
                         resp.text[:300],
                     )
                     return
 
                 data = resp.json()
-
                 for item in data.get("value", []):
-                    if "deleted" in item:
-                        continue  # ignore deletions
                     if "file" not in item:
-                        continue  # skip folders / drive root
-                    if Path(item.get("name", "")).suffix.lower() in _SUPPORTED:
-                        new_items.append(item)
+                        continue  # skip folders
+                    if Path(item.get("name", "")).suffix.lower() not in _SUPPORTED:
+                        continue
 
-                delta_link: str | None = data.get("@odata.deltaLink")
+                    remote_mtime_str: str = item.get("lastModifiedDateTime", "")
+                    stored_mtime: datetime | None = known_mtimes.get(item["id"])
+                    if stored_mtime and remote_mtime_str:
+                        try:
+                            remote_mtime = datetime.fromisoformat(
+                                remote_mtime_str.replace("Z", "+00:00")
+                            )
+                            if remote_mtime <= stored_mtime:
+                                continue  # unchanged since last ingest
+                        except ValueError:
+                            pass  # malformed timestamp → process anyway
+
+                    to_process.append(item)
+
                 next_url = data.get("@odata.nextLink")
 
-                if delta_link:
-                    await asyncio.to_thread(self._save_delta_link, delta_link)
-                    break  # delta link marks end of this change-set
-
-        if not new_items:
+        if not to_process:
+            logger.debug("SharePoint watcher: no new or changed files")
             return
 
-        logger.info("SharePoint watcher: %d new/changed file(s) to process", len(new_items))
+        logger.info("SharePoint watcher: %d new/changed file(s) to process", len(to_process))
         token = await asyncio.to_thread(get_access_token)
         async with httpx.AsyncClient(timeout=120.0, follow_redirects=True) as http:
-            for item in new_items:
+            for item in to_process:
                 await self._process_item(http, token, item)
 
     async def _process_item(
@@ -177,14 +203,22 @@ class SharePointWatcher:
         item_id: str = item["id"]
         filename: str = item.get("name", "unknown")
         web_url: str = item.get("webUrl", "")
+        modified_at: str = item.get("lastModifiedDateTime", "")
+        # Pre-authenticated download URL returned by Graph for file items.
+        # Present when listing via the Shares API (cross-tenant) and avoids
+        # a separate auth-gated request to /drives/{id}/items/{id}/content.
+        download_url: str | None = item.get("@microsoft.graph.downloadUrl")
 
         logger.info("SharePoint watcher: downloading %s (id=%s)", filename, item_id)
         try:
-            resp = await http.get(
-                f"https://graph.microsoft.com/v1.0"
-                f"/drives/{settings.sharepoint_drive_id}/items/{item_id}/content",
-                headers={"Authorization": f"Bearer {token}"},
-            )
+            if download_url:
+                resp = await http.get(download_url)
+            else:
+                resp = await http.get(
+                    f"https://graph.microsoft.com/v1.0"
+                    f"/drives/{settings.sharepoint_drive_id}/items/{item_id}/content",
+                    headers={"Authorization": f"Bearer {token}"},
+                )
             if resp.status_code != 200:
                 logger.error(
                     "SharePoint watcher: failed to download %s — HTTP %s",
@@ -199,6 +233,7 @@ class SharePointWatcher:
                 resp.content,
                 item_id,
                 web_url,
+                modified_at,
             )
             logger.info("SharePoint watcher: ingested %s — %s", filename, result)
 
@@ -208,40 +243,29 @@ class SharePointWatcher:
             )
 
     # ------------------------------------------------------------------ #
-    # Sync state helpers (run in thread via asyncio.to_thread)            #
+    # DB helpers (run in thread via asyncio.to_thread)                    #
     # ------------------------------------------------------------------ #
 
-    def _load_delta_link(self) -> str | None:
-        try:
-            with get_connection() as conn:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        "SELECT value FROM sync_state WHERE key = %s",
-                        (_SYNC_KEY,),
-                    )
-                    row = cur.fetchone()
-                    return row["value"] if row else None
-        except Exception:
-            logger.warning("SharePoint watcher: could not load delta link from DB")
-            return None
-
-    def _save_delta_link(self, delta_link: str) -> None:
+    def _load_item_mtimes(self) -> dict[str, datetime]:
+        """Return {sharepoint_item_id: sharepoint_modified_at} for all known items."""
         try:
             with get_connection() as conn:
                 with conn.cursor() as cur:
                     cur.execute(
                         """
-                        INSERT INTO sync_state (key, value, updated_at)
-                        VALUES (%s, %s, now())
-                        ON CONFLICT (key) DO UPDATE
-                            SET value = EXCLUDED.value,
-                                updated_at = now()
-                        """,
-                        (_SYNC_KEY, delta_link),
+                        SELECT sharepoint_item_id, sharepoint_modified_at
+                          FROM source_documents
+                         WHERE sharepoint_item_id IS NOT NULL
+                           AND sharepoint_modified_at IS NOT NULL
+                        """
                     )
-                conn.commit()
+                    return {
+                        row["sharepoint_item_id"]: row["sharepoint_modified_at"]
+                        for row in cur.fetchall()
+                    }
         except Exception:
-            logger.warning("SharePoint watcher: could not persist delta link")
+            logger.warning("SharePoint watcher: could not load item modification times")
+            return {}
 
 
 # ------------------------------------------------------------------ #

@@ -85,6 +85,7 @@ def ingest_sharepoint_file(
     content: bytes,
     sharepoint_item_id: str,
     sharepoint_web_url: str,
+    sharepoint_modified_at: str | None = None,
 ) -> dict[str, int]:
     """Ingest a single file downloaded from SharePoint.
 
@@ -115,6 +116,7 @@ def ingest_sharepoint_file(
                     source_path=sharepoint_item_id,
                     sharepoint_item_id=sharepoint_item_id,
                     sharepoint_web_url=sharepoint_web_url,
+                    sharepoint_modified_at=sharepoint_modified_at,
                 )
             conn.commit()
 
@@ -136,6 +138,7 @@ def _ingest_one_file(
     source_path: str,
     sharepoint_item_id: str | None = None,
     sharepoint_web_url: str | None = None,
+    sharepoint_modified_at: str | None = None,
 ) -> bool:
     """Insert a single file into the database.
 
@@ -155,12 +158,15 @@ def _ingest_one_file(
             cur.execute(
                 """
                 update source_documents
-                   set sharepoint_item_id = coalesce(sharepoint_item_id, %s),
-                       sharepoint_web_url  = coalesce(sharepoint_web_url,  %s)
+                   set sharepoint_item_id   = coalesce(sharepoint_item_id, %s),
+                       sharepoint_web_url   = coalesce(sharepoint_web_url, %s),
+                       sharepoint_modified_at = coalesce(%s, sharepoint_modified_at)
                  where document_id = %s
-                   and (sharepoint_item_id is null or sharepoint_web_url is null)
+                   and (sharepoint_item_id is null
+                        or sharepoint_web_url is null
+                        or sharepoint_modified_at is null)
                 """,
-                (sharepoint_item_id, sharepoint_web_url, existing["document_id"]),
+                (sharepoint_item_id, sharepoint_web_url, sharepoint_modified_at, existing["document_id"]),
             )
         return False
 
@@ -185,8 +191,8 @@ def _ingest_one_file(
         insert into source_documents (
             employee_id, source_system, source_path, original_filename,
             mime_type, sha256_hash, detected_language, ingest_status,
-            sharepoint_item_id, sharepoint_web_url
-        ) values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            sharepoint_item_id, sharepoint_web_url, sharepoint_modified_at
+        ) values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         returning document_id
         """,
         (
@@ -200,6 +206,7 @@ def _ingest_one_file(
             "ingested",
             sharepoint_item_id,
             sharepoint_web_url,
+            sharepoint_modified_at,
         ),
     )
     doc = cur.fetchone()
