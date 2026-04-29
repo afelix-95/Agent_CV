@@ -35,6 +35,7 @@ import logging
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
+from urllib.parse import urlparse, urlunparse
 
 import httpx
 
@@ -52,14 +53,21 @@ _SUPPORTED = {".pdf", ".txt", ".docx"}
 
 
 def _encode_sharing_url(url: str) -> str:
-    """Encode a sharing URL to the base64url token expected by the Graph Shares API."""
-    encoded = base64.urlsafe_b64encode(url.encode()).rstrip(b"=").decode()
+    """Encode a sharing URL to the base64url token expected by the Graph Shares API.
+
+    Query parameters (e.g. ``?email=...&e=...``) are stripped before encoding
+    because they are invitation-tracking extras that cause the Shares API to
+    return 403 when included in the encoded token.
+    """
+    parsed = urlparse(url)
+    clean_url = urlunparse(parsed._replace(query="", fragment=""))
+    encoded = base64.urlsafe_b64encode(clean_url.encode()).rstrip(b"=").decode()
     return f"u!{encoded}"
 
 
 def sharepoint_configured() -> bool:
     """Return True when the minimum SharePoint configuration is present."""
-    return bool(settings.sharepoint_url or settings.sharepoint_drive_id)
+    return bool(settings.sharepoint_folder_item_id or settings.sharepoint_drive_id)
 
 
 class SharePointWatcher:
@@ -82,11 +90,15 @@ class SharePointWatcher:
             self._task = asyncio.create_task(
                 self._poll_loop(), name="sharepoint-watcher"
             )
+            source = (
+                f"item={settings.sharepoint_folder_item_id}"
+                if settings.sharepoint_folder_item_id
+                else f"drive={settings.sharepoint_drive_id}, folder={settings.sharepoint_folder_path or '/'}"
+            )
             logger.info(
-                "SharePoint watcher started (interval=%ds, drive=%s, folder=%r)",
+                "SharePoint watcher started (interval=%ds, %s)",
                 self._poll_interval,
-                settings.sharepoint_url or settings.sharepoint_drive_id,
-                settings.sharepoint_folder_path or "/",
+                source,
             )
 
     async def stop(self) -> None:
@@ -120,19 +132,14 @@ class SharePointWatcher:
         drive = settings.sharepoint_drive_id
         item_id = settings.sharepoint_folder_item_id.strip()
         folder = settings.sharepoint_folder_path.strip("/")
-        sharing_url = settings.sharepoint_url.strip()
         select = "$select=id,name,file,webUrl,lastModifiedDateTime"
 
-        if sharing_url:
-            encoded = _encode_sharing_url(sharing_url)
+        if item_id:
+            # Cross-tenant shared folder: access via /me/drive/items which honours
+            # the sharing relationship visible in /me/drive/sharedWithMe.
             list_url = (
                 f"https://graph.microsoft.com/v1.0"
-                f"/shares/{encoded}/driveItem/children?{select}"
-            )
-        elif item_id:
-            list_url = (
-                f"https://graph.microsoft.com/v1.0"
-                f"/drives/{drive}/items/{item_id}/children?{select}"
+                f"/me/drive/items/{item_id}/children?{select}"
             )
         elif folder:
             list_url = (
@@ -214,9 +221,9 @@ class SharePointWatcher:
             if download_url:
                 resp = await http.get(download_url)
             else:
+                # Fall back to /me/drive/items which works for cross-tenant shared items.
                 resp = await http.get(
-                    f"https://graph.microsoft.com/v1.0"
-                    f"/drives/{settings.sharepoint_drive_id}/items/{item_id}/content",
+                    f"https://graph.microsoft.com/v1.0/me/drive/items/{item_id}/content",
                     headers={"Authorization": f"Bearer {token}"},
                 )
             if resp.status_code != 200:
