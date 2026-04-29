@@ -1,27 +1,5 @@
 services:
 
-  # ── Traefik reverse proxy (TLS termination via Let's Encrypt) ────────────────
-  traefik:
-    image: traefik:v3.3
-    restart: unless-stopped
-    command:
-      - --providers.docker=true
-      - --providers.docker.exposedbydefault=false
-      - --entrypoints.web.address=:80
-      - --entrypoints.web.http.redirections.entrypoint.to=websecure
-      - --entrypoints.web.http.redirections.entrypoint.scheme=https
-      - --entrypoints.websecure.address=:443
-      - --certificatesresolvers.letsencrypt.acme.httpchallenge=true
-      - --certificatesresolvers.letsencrypt.acme.httpchallenge.entrypoint=web
-      - --certificatesresolvers.letsencrypt.acme.email=${ACME_EMAIL}
-      - --certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json
-    ports:
-      - "80:80"
-      - "443:443"
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-      - letsencrypt:/letsencrypt
-
   # ── PostgreSQL with pgvector ─────────────────────────────────────────────────
   db:
     image: pgvector/pgvector:pg17
@@ -54,13 +32,22 @@ services:
     depends_on:
       db:
         condition: service_healthy
+    networks:
+      - default
+      - traefik
     labels:
       - "traefik.enable=true"
-      - "traefik.http.routers.app.rule=Host(`${APP_DOMAIN}`)"
-      - "traefik.http.routers.app.entrypoints=websecure"
-      - "traefik.http.routers.app.tls.certresolver=letsencrypt"
-      - "traefik.http.services.app.loadbalancer.server.port=8000"
+      - "traefik.docker.network=${TRAEFIK_NETWORK:-traefik-public}"
+      - "traefik.http.routers.agent-cv.rule=Host(`${APP_DOMAIN}`)"
+      - "traefik.http.routers.agent-cv.entrypoints=websecure"
+      - "traefik.http.routers.agent-cv.tls=true"
+      - "traefik.http.services.agent-cv.loadbalancer.server.port=8000"
+
+networks:
+  default: {}
+  traefik:
+    external: true
+    name: ${TRAEFIK_NETWORK:-traefik-public}
 
 volumes:
   pg_data:
-  letsencrypt:
