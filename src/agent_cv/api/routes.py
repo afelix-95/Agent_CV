@@ -1,6 +1,8 @@
+import asyncio
 import time
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Query, Request, Response
+from fastapi.responses import PlainTextResponse
 
 from agent_cv.api.models import (
     AuditLogsResponse,
@@ -17,7 +19,7 @@ from agent_cv.services.query_service import audit_query
 from agent_cv.services.agent_service import handle_user_query
 from agent_cv.config import settings
 from agent_cv.services.graph_service import graph_setup_issue
-from agent_cv.teams.agent import get_graph_bot
+from agent_cv.teams.agent import get_teams_bot
 
 router = APIRouter()
 
@@ -119,11 +121,35 @@ def teams_status() -> dict[str, str]:
     issue = graph_setup_issue()
     if issue:
         return {"status": "not-configured", "detail": issue}
-    bot = get_graph_bot()
+    bot = get_teams_bot()
     return {
         "status": "running" if bot.running else "stopped",
         "account": settings.graph_user_email,
     }
+
+
+@router.post("/webhooks/teams")
+async def teams_webhook(
+    request: Request,
+    validationToken: str | None = Query(default=None),
+) -> Response:
+    # Graph subscription validation handshake: echo the token back as text/plain
+    if validationToken:
+        return PlainTextResponse(validationToken, status_code=200)
+
+    body = await request.json()
+    notifications = body.get("value", [])
+    bot = get_teams_bot()
+    for notification in notifications:
+        # Only process new-message events; ignore lifecycle/missed notifications
+        if notification.get("changeType") != "created":
+            continue
+        resource = notification.get("resource", "")
+        client_state = notification.get("clientState", "")
+        asyncio.create_task(bot.handle_notification(resource, client_state))
+
+    # Return 202 immediately — processing happens in background tasks
+    return Response(status_code=202)
 
 
 def _safe_audit(

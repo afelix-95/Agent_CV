@@ -8,7 +8,7 @@ from agent_cv.api.routes import router
 from agent_cv.db.schema import apply_schema
 from agent_cv.ingestion.sharepoint_watcher import get_sharepoint_watcher, sharepoint_configured
 from agent_cv.services.graph_service import graph_configured
-from agent_cv.teams.agent import get_graph_bot
+from agent_cv.teams.agent import get_teams_bot
 
 logger = logging.getLogger("agent_cv")
 
@@ -24,11 +24,11 @@ async def lifespan(app: FastAPI):
     apply_schema()
     logger.info("Schema up to date.")
     if graph_configured():
-        get_graph_bot().start()
+        await get_teams_bot().start()
     if sharepoint_configured():
         get_sharepoint_watcher().start()
     yield
-    await get_graph_bot().stop()
+    await get_teams_bot().stop()
     if sharepoint_configured():
         await get_sharepoint_watcher().stop()
 

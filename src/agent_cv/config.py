@@ -25,8 +25,16 @@ class Settings(BaseSettings):
     graph_user_password: str = ""
     # Space-separated delegated scopes; defaults to all admin-consented permissions
     graph_scopes: str = "https://graph.microsoft.com/.default"
-    # How often (in seconds) the polling bot checks for new messages
+    # How often (in seconds) the polling bot checks for new messages (legacy, kept for compat)
     graph_poll_interval: int = 5
+
+    # Microsoft Graph Change Notifications (webhook) settings
+    # Public HTTPS base URL of this service (e.g. https://agent-cv.example.com).
+    # Must be reachable by Microsoft Graph to deliver change notifications.
+    webhook_base_url: str = ""
+    # Random secret sent as clientState in Graph subscriptions; used to validate
+    # that incoming notifications originate from Graph (not a third party).
+    webhook_secret: str = ""
 
     # SharePoint document library watcher
     # Sharing link URL for the folder (e.g. from Share → Copy link in OneDrive/SharePoint).

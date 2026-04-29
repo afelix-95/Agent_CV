@@ -94,6 +94,8 @@ def graph_configured() -> bool:
             settings.teams_bot_tenant_id,
             settings.graph_user_email,
             settings.graph_user_password,
+            settings.webhook_base_url,
+            settings.webhook_secret,
         )
     )
 
@@ -110,6 +112,8 @@ def graph_setup_issue() -> str | None:
             ("TEAMS_BOT_TENANT_ID", settings.teams_bot_tenant_id),
             ("GRAPH_USER_EMAIL", settings.graph_user_email),
             ("GRAPH_USER_PASSWORD", settings.graph_user_password),
+            ("WEBHOOK_BASE_URL", settings.webhook_base_url),
+            ("WEBHOOK_SECRET", settings.webhook_secret),
         )
         if not bool(value)
     ]
