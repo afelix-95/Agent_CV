@@ -42,6 +42,8 @@ class Settings(BaseSettings):
     sharepoint_folder_item_id: str = ""
     # How often (in seconds) to check the SharePoint library for new files
     sharepoint_poll_interval: int = 3600
+    # Password for password-protected sharing links (set via X-Sharing-Link-Password header)
+    sharepoint_password: str = ""
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 

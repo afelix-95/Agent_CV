@@ -21,6 +21,9 @@ WORKDIR /app
 # Copy installed packages (deps + agent_cv package + metadata) from builder stage
 COPY --from=builder /install /usr/local
 
+# Embed SQL migrations so apply_schema() can find them at runtime.
+COPY sql/ /app/sql/
+
 # Expose the PDF folder as a mount point.
 # CVs are NOT baked into the image; mount the host directory at runtime.
 VOLUME ["/app/PDFs"]

@@ -156,5 +156,6 @@ def get_access_token() -> str:
 
     Uses the cached MSAL token (with silent refresh) so repeated calls are cheap.
     """
-    token = _get_credential().get_token("https://graph.microsoft.com/.default")
+    scopes = settings.graph_scopes.split() if settings.graph_scopes else _DEFAULT_SCOPES
+    token = _get_credential().get_token(*scopes)
     return token.token
