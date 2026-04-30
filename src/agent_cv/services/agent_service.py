@@ -30,7 +30,8 @@ TOOLS: list[dict] = [
             "description": (
                 "Search the employee certifications database by technology, vendor, or keyword. "
                 "Returns employees with matching certifications including name, vendor, status, and dates. "
-                "Use this whenever the user asks who has certifications in a specific area."
+                "Use this whenever the user asks who has certifications in a specific area. "
+                "Supports pagination: use 'offset' to fetch the next page of results (page size is 15)."
             ),
             "parameters": {
                 "type": "object",
@@ -47,6 +48,10 @@ TOOLS: list[dict] = [
                         "type": "string",
                         "enum": ["active", "expired", "any"],
                         "description": "Filter by certificate status. Default: 'any'.",
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "description": "Number of results to skip for pagination. Default: 0 (first page). Use 15 for the second page, 30 for the third, etc.",
                     },
                 },
                 "required": ["query"],
@@ -187,6 +192,7 @@ HOW TO RESPOND:
 11. When the user asks to see or share an employee's CV, call get_employee_cv_link and include the returned URL as a plain hyperlink in your reply
 12. When answering questions about expired or expiring certifications, ALWAYS call search_certifications with status="any" — never pre-filter to "expired" or "expiring" in the tool call. Filter and categorise in your answer instead, to avoid incomplete results.
 13. Certification results include an "inferred_expiry_date" field for records where the expiry date was not registered. If this field is a date (not null or "unknown"), use it as an estimated expiry and clearly label it as "estimated" or "inferred" in your answer. If it is null, the cert does not expire. If it is "unknown", you cannot infer an expiry date for that record.
+14. PAGINATION — search_certifications returns 15 results per page. When has_more=true in the result, tell the user how many results remain and offer to show more. When the user asks to see more results (e.g. "show more", "next", "ver mais"), call search_certifications again with the same query/status and offset=next_offset from the previous result.
 """
 
 _SYSTEM_PROMPT_PT = """\
@@ -224,6 +230,7 @@ COMO RESPONDER:
 11. Quando o utilizador pedir para ver ou partilhar o CV de um colaborador, usa get_employee_cv_link e inclui o URL retornado como hiperligação na tua resposta
 12. Quando responderes a perguntas sobre certificações vencidas ou a vencer, usa SEMPRE search_certifications com status="any" — nunca pré-filtres para "expired" ou "expiring" na chamada da ferramenta. Filtra e categoriza na tua resposta, para evitar resultados incompletos.
 13. Os resultados de certificações incluem um campo "inferred_expiry_date" para registos em que a data de validade não foi registada. Se este campo contiver uma data (não nulo nem "unknown"), usa-a como validade estimada e indica claramente que é uma estimativa na tua resposta. Se for nulo, a certificação não expira. Se for "unknown", não é possível inferir a data de validade desse registo.
+14. PAGINAÇÃO — search_certifications devolve 15 resultados por página. Quando has_more=true no resultado, informa o utilizador de quantos resultados restam e oferece mostrar mais. Quando o utilizador pedir para ver mais resultados (ex: "mostrar mais", "ver mais", "próximos"), chama search_certifications novamente com o mesmo query/status e offset=next_offset do resultado anterior.
 """
 
 
@@ -322,7 +329,7 @@ def handle_user_query(
                 tools=TOOLS,
                 tool_choice="auto",
                 temperature=0.3,
-                max_completion_tokens=900,
+                max_completion_tokens=2048,
             )
         except Exception:
             logger.exception("Agent loop: LLM call failed on iteration %d", iteration)
@@ -422,7 +429,7 @@ def _dispatch_tool(name: str, args: dict) -> Any:
     try:
         if name == "search_certifications":
             return _tool_search_certifications(
-                **{k: v for k, v in args.items() if k in ("query", "employee_name", "status")}
+                **{k: v for k, v in args.items() if k in ("query", "employee_name", "status", "offset")}
             )
         if name == "search_experience":
             return _tool_search_experience(
@@ -553,14 +560,20 @@ def _infer_expiry_date(cert_name: str, vendor: str, issue_date: object) -> objec
     return "unknown"  # no rule matched
 
 
+_PAGE_SIZE = 15
+
+
 def _tool_search_certifications(
     query: str,
     employee_name: str | None = None,
     status: str = "any",
+    offset: int = 0,
 ) -> dict:
     from agent_cv.services.retrieval_service import _embed_query, _search_semantic_chunks
 
     structured = _sql_search_certifications(query, employee_name, status)
+    total = len(structured)
+    page = structured[offset: offset + _PAGE_SIZE]
 
     query_vector = _embed_query(query)
     semantic_excerpts: list[dict] = []
@@ -574,11 +587,24 @@ def _tool_search_certifications(
                 "excerpt": s.text[:300],
             })
 
-    return {
-        "certifications": structured,
+    result: dict = {
+        "certifications": page,
         "semantic_excerpts": semantic_excerpts[:5],
-        "total_found": len(structured),
+        "total_found": total,
+        "offset": offset,
+        "page_size": _PAGE_SIZE,
     }
+    if offset + _PAGE_SIZE < total:
+        result["has_more"] = True
+        result["next_offset"] = offset + _PAGE_SIZE
+        result["note"] = (
+            f"Showing results {offset + 1}–{offset + len(page)} of {total}. "
+            f"Call again with offset={offset + _PAGE_SIZE} to get the next page."
+        )
+    else:
+        result["has_more"] = False
+        result["note"] = f"Showing results {offset + 1}–{offset + len(page)} of {total}. All results shown."
+    return result
 
 
 def _sql_search_certifications(
