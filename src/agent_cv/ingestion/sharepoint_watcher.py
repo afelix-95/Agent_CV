@@ -136,9 +136,35 @@ class SharePointWatcher:
         else:
             folder = settings.sharepoint_folder_path.strip("/")
             if folder:
+                # Resolve the folder to an item ID first so the path doesn't have
+                # to match the drive root exactly (works for "REPOCV" and
+                # "Documents/REPOCV" alike).
+                async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as _http:
+                    resolve_resp = await _http.get(
+                        f"https://graph.microsoft.com/v1.0/me/drive/root:/{folder}",
+                        headers=headers,
+                        params={"$select": "id,name"},
+                    )
+                if resolve_resp.status_code == 404:
+                    # Try common OneDrive for Business "Documents/" prefix
+                    async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as _http:
+                        resolve_resp = await _http.get(
+                            f"https://graph.microsoft.com/v1.0/me/drive/root:/Documents/{folder}",
+                            headers=headers,
+                            params={"$select": "id,name"},
+                        )
+                if resolve_resp.status_code != 200:
+                    logger.error(
+                        "SharePoint watcher: could not resolve folder %r — HTTP %s %s",
+                        folder,
+                        resolve_resp.status_code,
+                        resolve_resp.text[:200],
+                    )
+                    return
+                folder_id = resolve_resp.json()["id"]
                 start_url = (
                     f"https://graph.microsoft.com/v1.0"
-                    f"/me/drive/root:/{folder}:/delta?{select}"
+                    f"/me/drive/items/{folder_id}/delta?{select}"
                 )
             else:
                 start_url = (
