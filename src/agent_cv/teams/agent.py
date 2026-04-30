@@ -164,7 +164,7 @@ class TeamsWebhookBot:
                 },
                 json={
                     "changeType": "created",
-                    "notificationUrl": f"{settings.webhook_base_url}/webhooks/teams",
+                    "notificationUrl": f"{settings.webhook_base_url}/graph-notifications/teams",
                     "resource": "/me/chats/getAllMessages",
                     "expirationDateTime": expiry_str,
                     "clientState": settings.webhook_secret,

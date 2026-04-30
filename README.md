@@ -41,26 +41,50 @@ PostgreSQL-first backend for querying employee certifications and CV information
 3. Ensure PostgreSQL has `pgvector` extension available.
 4. Run DB schema initialization:
 
+**pwsh**
+```pwsh
+python -m scripts.init_db
+```
+**bash**
 ```bash
 python -m scripts.init_db
 ```
 
 5. Start API:
 
+**pwsh**
+```pwsh
+uvicorn agent_cv.main:app --reload --app-dir src
+```
+**bash**
 ```bash
 uvicorn agent_cv.main:app --reload --app-dir src
 ```
 
 6. Ingest files:
 
-```bash
+**pwsh**
+```pwsh
 Invoke-RestMethod -Method POST -Uri http://localhost:8000/admin/ingest -ContentType "application/json" -Body (@{ max_files = 200 } | ConvertTo-Json -Compress)
+```
+**bash**
+```bash
+curl -s -X POST http://localhost:8000/admin/ingest \
+  -H "Content-Type: application/json" \
+  -d '{"max_files": 200}'
 ```
 
 7. Query:
 
-```bash
+**pwsh**
+```pwsh
 Invoke-RestMethod -Method POST -Uri http://localhost:8000/query -ContentType "application/json; charset=utf-8" -Body (@{ query = "Quem tem certificações para armazenamento em nuvem?"; language = "pt" } | ConvertTo-Json -Compress)
+```
+**bash**
+```bash
+curl -s -X POST http://localhost:8000/query \
+  -H "Content-Type: application/json; charset=utf-8" \
+  -d '{"query": "Quem tem certificações para armazenamento em nuvem?", "language": "pt"}'
 ```
 
 ## Architecture

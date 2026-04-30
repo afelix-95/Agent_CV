@@ -128,7 +128,7 @@ def teams_status() -> dict[str, str]:
     }
 
 
-@router.post("/webhooks/teams")
+@router.post("/graph-notifications/teams")
 async def teams_webhook(
     request: Request,
     validationToken: str | None = Query(default=None),
