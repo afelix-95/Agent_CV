@@ -136,32 +136,9 @@ class SharePointWatcher:
         else:
             folder = settings.sharepoint_folder_path.strip("/")
             if folder:
-                # Resolve the folder to an item ID first so the path doesn't have
-                # to match the drive root exactly (works for "REPOCV" and
-                # "Documents/REPOCV" alike).
-                async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as _http:
-                    resolve_resp = await _http.get(
-                        f"https://graph.microsoft.com/v1.0/me/drive/root:/{folder}",
-                        headers=headers,
-                        params={"$select": "id,name"},
-                    )
-                if resolve_resp.status_code == 404:
-                    # Try common OneDrive for Business "Documents/" prefix
-                    async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as _http:
-                        resolve_resp = await _http.get(
-                            f"https://graph.microsoft.com/v1.0/me/drive/root:/Documents/{folder}",
-                            headers=headers,
-                            params={"$select": "id,name"},
-                        )
-                if resolve_resp.status_code != 200:
-                    logger.error(
-                        "SharePoint watcher: could not resolve folder %r — HTTP %s %s",
-                        folder,
-                        resolve_resp.status_code,
-                        resolve_resp.text[:200],
-                    )
+                folder_id = await self._resolve_folder_id(headers, folder)
+                if not folder_id:
                     return
-                folder_id = resolve_resp.json()["id"]
                 start_url = (
                     f"https://graph.microsoft.com/v1.0"
                     f"/me/drive/items/{folder_id}/delta?{select}"
@@ -210,6 +187,78 @@ class SharePointWatcher:
         async with httpx.AsyncClient(timeout=120.0, follow_redirects=True) as http:
             for item in new_items:
                 await self._process_item(http, token, item)
+
+    async def _resolve_folder_id(
+        self, headers: dict[str, str], folder: str
+    ) -> str | None:
+        """Resolve a folder name/path to its OneDrive item ID.
+
+        Tries three strategies in order:
+        1. Path-based lookup: /me/drive/root:/{folder}
+        2. Enumerate root children and match by name (case-insensitive)
+        3. Enumerate root children recursively for nested paths
+        Logs all root folder names when resolution fails.
+        """
+        # Strategy 1: direct path lookup
+        async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as _http:
+            resp = await _http.get(
+                f"https://graph.microsoft.com/v1.0/me/drive/root:/{folder}",
+                headers=headers,
+                params={"$select": "id,name"},
+            )
+        if resp.status_code == 200:
+            return resp.json()["id"]
+
+        # Strategy 2: enumerate root children and match by name (handles casing, etc.)
+        target_name = folder.split("/")[0]  # top-level folder name
+        async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as _http:
+            children_resp = await _http.get(
+                "https://graph.microsoft.com/v1.0/me/drive/root/children",
+                headers=headers,
+                params={"$select": "id,name,folder"},
+            )
+        if children_resp.status_code == 200:
+            all_folders = [
+                i for i in children_resp.json().get("value", []) if "folder" in i
+            ]
+            folder_names = [i["name"] for i in all_folders]
+            matched = next(
+                (i for i in all_folders if i["name"].lower() == target_name.lower()),
+                None,
+            )
+            if matched:
+                item_id = matched["id"]
+                # If the config path has sub-segments, resolve them recursively
+                remaining = "/".join(folder.split("/")[1:])
+                if remaining:
+                    async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as _http:
+                        sub_resp = await _http.get(
+                            f"https://graph.microsoft.com/v1.0/me/drive/items/{item_id}:/{remaining}",
+                            headers=headers,
+                            params={"$select": "id,name"},
+                        )
+                    if sub_resp.status_code == 200:
+                        return sub_resp.json()["id"]
+                    logger.error(
+                        "SharePoint watcher: found top-level folder %r but could not "
+                        "resolve sub-path %r — HTTP %s",
+                        matched["name"], remaining, sub_resp.status_code,
+                    )
+                    return None
+                return item_id
+            logger.error(
+                "SharePoint watcher: folder %r not found. "
+                "Root folders on the drive: %s",
+                folder,
+                folder_names,
+            )
+        else:
+            logger.error(
+                "SharePoint watcher: could not list root children — HTTP %s %s",
+                children_resp.status_code,
+                children_resp.text[:300],
+            )
+        return None
 
     async def _process_item(
         self, http: httpx.AsyncClient, token: str, item: dict
