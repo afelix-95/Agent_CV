@@ -510,8 +510,24 @@ def _parse_table(lines: list[str]) -> str:
     )
 
 
+def _apply_inline_markdown(text: str) -> str:
+    """Convert inline markdown (bold, italic, code, citations) to HTML spans."""
+    # Bold+italic ***text*** or ___text___
+    text = re.sub(r"\*{3}(.+?)\*{3}", r"<strong><em>\1</em></strong>", text)
+    text = re.sub(r"_{3}(.+?)_{3}", r"<strong><em>\1</em></strong>", text)
+    # Bold **text** or __text__
+    text = re.sub(r"\*{2}(.+?)\*{2}", r"<strong>\1</strong>", text)
+    text = re.sub(r"_{2}(.+?)_{2}", r"<strong>\1</strong>", text)
+    # Italic *text* or _text_
+    text = re.sub(r"\*(.+?)\*", r"<em>\1</em>", text)
+    text = re.sub(r"_(.+?)_", r"<em>\1</em>", text)
+    # Inline code `code`
+    text = re.sub(r"`(.+?)`", r"<code>\1</code>", text)
+    return text
+
+
 def _text_to_html(text: str) -> str:
-    """Convert LLM plain-text output (bullets, tables, newlines) to Teams-compatible HTML."""
+    """Convert LLM markdown output (bullets, tables, headings, bold/italic) to Teams-compatible HTML."""
     lines = text.split("\n")
     parts: list[str] = []
     in_list = False
@@ -522,35 +538,66 @@ def _text_to_html(text: str) -> str:
             parts.append(_parse_table(table_buf))
             table_buf.clear()
 
+    def close_list() -> None:
+        nonlocal in_list
+        if in_list:
+            parts.append("</ul>")
+            in_list = False
+
     for line in lines:
         stripped = line.strip()
 
         # Accumulate markdown pipe-table rows
         if _is_table_row(stripped):
-            if in_list:
-                parts.append("</ul>")
-                in_list = False
+            close_list()
             table_buf.append(stripped)
             continue
 
         # Non-table line — flush any buffered table first
         flush_table()
 
-        if stripped.startswith("•"):
+        # ATX headings: # H1, ## H2, ### H3
+        heading_match = re.match(r"^(#{1,3})\s+(.+)$", stripped)
+        if heading_match:
+            close_list()
+            level = len(heading_match.group(1))
+            tag = f"h{level}"
+            parts.append(f"<{tag}>{_html.escape(heading_match.group(2))}</{tag}>")
+            continue
+
+        # Horizontal rule --- or ***
+        if re.fullmatch(r"[-*_]{3,}", stripped):
+            close_list()
+            parts.append("<hr/>")
+            continue
+
+        # Bullet points: •, -, *, +
+        bullet_match = re.match(r"^[•\-\*\+]\s+(.*)", stripped)
+        if bullet_match:
             if not in_list:
                 parts.append("<ul>")
                 in_list = True
-            parts.append(f"<li>{_html.escape(stripped[1:].strip())}</li>")
-        else:
-            if in_list:
-                parts.append("</ul>")
-                in_list = False
-            if stripped:
-                parts.append(f"<p>{_html.escape(stripped)}</p>")
+            content = _apply_inline_markdown(_html.escape(bullet_match.group(1)))
+            parts.append(f"<li>{content}</li>")
+            continue
+
+        # Numbered list: 1. item
+        numbered_match = re.match(r"^\d+\.\s+(.*)", stripped)
+        if numbered_match:
+            if not in_list:
+                parts.append("<ul>")
+                in_list = True
+            content = _apply_inline_markdown(_html.escape(numbered_match.group(1)))
+            parts.append(f"<li>{content}</li>")
+            continue
+
+        close_list()
+        if stripped:
+            content = _apply_inline_markdown(_html.escape(stripped))
+            parts.append(f"<p>{content}</p>")
 
     flush_table()
-    if in_list:
-        parts.append("</ul>")
+    close_list()
 
     return "".join(parts)
 
