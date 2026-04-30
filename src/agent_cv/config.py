@@ -45,10 +45,11 @@ class Settings(BaseSettings):
     # Password for password-protected sharing links (set via X-Sharing-Link-Password header)
     sharepoint_password: str = ""
 
-    # Secure file download endpoint
-    # Base URL of this service as reachable by the Teams client (used to build CV download links).
-    # Defaults to WEBHOOK_BASE_URL when not set explicitly.
+    # Webhook / public URL settings
     webhook_base_url: str = ""
+    webhook_secret: str = ""
+
+    # Secure file download endpoint
     file_download_secret: str = ""
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
