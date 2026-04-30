@@ -161,7 +161,7 @@ async def teams_webhook(
 _TOKEN_TTL = 86400  # 24 hours
 
 
-def generate_cv_download_url(document_id: int) -> str:
+def generate_cv_download_url(document_id: str) -> str:
     """Return a time-limited signed URL for downloading a CV file."""
     base = (settings.webhook_base_url or "").rstrip("/")
     expires = int(time.time()) + _TOKEN_TTL
@@ -173,7 +173,7 @@ def generate_cv_download_url(document_id: int) -> str:
 
 @router.get("/files/{document_id}")
 def download_cv_file(
-    document_id: int,
+    document_id: str,
     expires: int = Query(...),
     token: str = Query(...),
 ) -> FileResponse:

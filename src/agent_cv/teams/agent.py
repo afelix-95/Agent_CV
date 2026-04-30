@@ -574,8 +574,30 @@ def _parse_table(lines: list[str]) -> str:
     )
 
 
-def _apply_inline_markdown(text: str) -> str:
-    """Convert inline markdown (bold, italic, code, citations) to HTML spans."""
+def _apply_inline_markdown(raw: str) -> str:
+    """Convert inline markdown to HTML. Accepts raw (un-escaped) text."""
+    # Extract markdown links [label](url) before HTML-escaping so & in URLs
+    # doesn't get mangled. Replace them with a placeholder, escape the rest,
+    # then restore.
+    _LINK_RE = re.compile(r"\[([^\]]+)\]\((https?://[^)]+)\)")
+    placeholders: list[tuple[str, str, str]] = []
+
+    def _stash_link(m: re.Match) -> str:
+        idx = len(placeholders)
+        placeholders.append((f"\x00LINK{idx}\x00", m.group(1), m.group(2)))
+        return placeholders[-1][0]
+
+    raw_with_stash = _LINK_RE.sub(_stash_link, raw)
+    text = _html.escape(raw_with_stash)
+
+    # Restore links
+    for placeholder, label, url in placeholders:
+        escaped_placeholder = _html.escape(placeholder)
+        text = text.replace(
+            escaped_placeholder,
+            f'<a href="{url}">{_html.escape(label)}</a>',
+        )
+
     # Bold+italic ***text*** or ___text___
     text = re.sub(r"\*{3}(.+?)\*{3}", r"<strong><em>\1</em></strong>", text)
     text = re.sub(r"_{3}(.+?)_{3}", r"<strong><em>\1</em></strong>", text)
@@ -646,7 +668,7 @@ def _text_to_html(text: str) -> str:
         # Bullet points: •, -, *, + (top-level when indent < 2, nested otherwise)
         bullet_match = re.match(r"^[•\-\*\+]\s+(.*)", stripped)
         if bullet_match:
-            content = _apply_inline_markdown(_html.escape(bullet_match.group(1).strip()))
+            content = _apply_inline_markdown(bullet_match.group(1).strip())
             if indent < 2:
                 # Top-level bullet
                 if depth == 2:
@@ -673,7 +695,7 @@ def _text_to_html(text: str) -> str:
         # Numbered list: 1. item
         numbered_match = re.match(r"^(\s*)\d+\.\s+(.*)", line)
         if numbered_match:
-            content = _apply_inline_markdown(_html.escape(numbered_match.group(2).strip()))
+            content = _apply_inline_markdown(numbered_match.group(2).strip())
             item_indent = len(numbered_match.group(1))
             if item_indent < 2:
                 if depth == 2:
@@ -698,7 +720,7 @@ def _text_to_html(text: str) -> str:
 
         close_lists()
         if stripped:
-            content = _apply_inline_markdown(_html.escape(stripped))
+            content = _apply_inline_markdown(stripped)
             parts.append(f"<p>{content}</p>")
 
     flush_table()
