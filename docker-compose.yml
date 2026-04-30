@@ -45,7 +45,7 @@ services:
       - "traefik.http.routers.agent-cv-webhook.tls=true"
       - "traefik.http.routers.agent-cv-webhook.service=agent-cv"
       - "traefik.http.routers.agent-cv-webhook.priority=100"
-      - "traefik.http.routers.agent-cv-api.rule=Host(`${APP_DOMAIN}`) && PathPrefix(`/admin`, `/query`, `/teams`, `/health`, `/employees`, `/docs`, `/openapi`)"
+      - "traefik.http.routers.agent-cv-api.rule=Host(`${APP_DOMAIN}`) && (PathPrefix(`/admin`) || PathPrefix(`/query`) || PathPrefix(`/teams`) || PathPrefix(`/health`) || PathPrefix(`/employees`) || PathPrefix(`/docs`) || PathPrefix(`/openapi`))"
       - "traefik.http.routers.agent-cv-api.entrypoints=websecure"
       - "traefik.http.routers.agent-cv-api.tls=true"
       - "traefik.http.routers.agent-cv-api.service=agent-cv"
