@@ -527,10 +527,17 @@ def _apply_inline_markdown(text: str) -> str:
 
 
 def _text_to_html(text: str) -> str:
-    """Convert LLM markdown output (bullets, tables, headings, bold/italic) to Teams-compatible HTML."""
+    """Convert LLM markdown output (bullets, nested bullets, tables, headings, bold/italic)
+    to Teams-compatible HTML.
+
+    List depth state machine:
+      depth 0 — not in any list
+      depth 1 — inside <ul>, current <li> is OPEN (no closing tag yet)
+      depth 2 — inside nested <ul> within the open <li> at depth 1
+    """
     lines = text.split("\n")
     parts: list[str] = []
-    in_list = False
+    depth = 0  # 0 | 1 | 2
     table_buf: list[str] = []
 
     def flush_table() -> None:
@@ -538,66 +545,100 @@ def _text_to_html(text: str) -> str:
             parts.append(_parse_table(table_buf))
             table_buf.clear()
 
-    def close_list() -> None:
-        nonlocal in_list
-        if in_list:
-            parts.append("</ul>")
-            in_list = False
+    def close_lists() -> None:
+        nonlocal depth
+        if depth == 2:
+            parts.append("</ul></li></ul>")
+        elif depth == 1:
+            parts.append("</li></ul>")
+        depth = 0
 
     for line in lines:
         stripped = line.strip()
+        indent = len(line) - len(line.lstrip(" \t"))
 
         # Accumulate markdown pipe-table rows
         if _is_table_row(stripped):
-            close_list()
+            close_lists()
             table_buf.append(stripped)
             continue
 
-        # Non-table line — flush any buffered table first
         flush_table()
 
         # ATX headings: # H1, ## H2, ### H3
         heading_match = re.match(r"^(#{1,3})\s+(.+)$", stripped)
         if heading_match:
-            close_list()
+            close_lists()
             level = len(heading_match.group(1))
-            tag = f"h{level}"
-            parts.append(f"<{tag}>{_html.escape(heading_match.group(2))}</{tag}>")
+            parts.append(f"<h{level}>{_html.escape(heading_match.group(2))}</h{level}>")
             continue
 
         # Horizontal rule --- or ***
         if re.fullmatch(r"[-*_]{3,}", stripped):
-            close_list()
+            close_lists()
             parts.append("<hr/>")
             continue
 
-        # Bullet points: •, -, *, +
+        # Bullet points: •, -, *, + (top-level when indent < 2, nested otherwise)
         bullet_match = re.match(r"^[•\-\*\+]\s+(.*)", stripped)
         if bullet_match:
-            if not in_list:
-                parts.append("<ul>")
-                in_list = True
-            content = _apply_inline_markdown(_html.escape(bullet_match.group(1)))
-            parts.append(f"<li>{content}</li>")
+            content = _apply_inline_markdown(_html.escape(bullet_match.group(1).strip()))
+            if indent < 2:
+                # Top-level bullet
+                if depth == 2:
+                    parts.append("</ul></li>")  # close nested ul, keep outer ul open
+                    depth = 1
+                    parts.append(f"<li>{content}")
+                elif depth == 1:
+                    parts.append(f"</li><li>{content}")
+                else:
+                    parts.append(f"<ul><li>{content}")
+                    depth = 1
+            else:
+                # Indented bullet → nested
+                if depth == 0:
+                    parts.append(f"<ul><li>{content}")
+                    depth = 1
+                elif depth == 1:
+                    parts.append(f"<ul><li>{content}</li>")
+                    depth = 2
+                else:
+                    parts.append(f"<li>{content}</li>")
             continue
 
         # Numbered list: 1. item
-        numbered_match = re.match(r"^\d+\.\s+(.*)", stripped)
+        numbered_match = re.match(r"^(\s*)\d+\.\s+(.*)", line)
         if numbered_match:
-            if not in_list:
-                parts.append("<ul>")
-                in_list = True
-            content = _apply_inline_markdown(_html.escape(numbered_match.group(1)))
-            parts.append(f"<li>{content}</li>")
+            content = _apply_inline_markdown(_html.escape(numbered_match.group(2).strip()))
+            item_indent = len(numbered_match.group(1))
+            if item_indent < 2:
+                if depth == 2:
+                    parts.append("</ul></li>")
+                    depth = 1
+                    parts.append(f"<li>{content}")
+                elif depth == 1:
+                    parts.append(f"</li><li>{content}")
+                else:
+                    parts.append(f"<ul><li>{content}")
+                    depth = 1
+            else:
+                if depth == 0:
+                    parts.append(f"<ul><li>{content}")
+                    depth = 1
+                elif depth == 1:
+                    parts.append(f"<ul><li>{content}</li>")
+                    depth = 2
+                else:
+                    parts.append(f"<li>{content}</li>")
             continue
 
-        close_list()
+        close_lists()
         if stripped:
             content = _apply_inline_markdown(_html.escape(stripped))
             parts.append(f"<p>{content}</p>")
 
     flush_table()
-    close_list()
+    close_lists()
 
     return "".join(parts)
 

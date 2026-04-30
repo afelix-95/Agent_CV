@@ -172,9 +172,13 @@ HOW TO RESPOND:
 4. Respond in the SAME LANGUAGE as the user's message
 5. Write in a conversational, helpful tone — like a knowledgeable colleague
 6. FORMATTING — structure your replies clearly:
-   - Group results by employee: use the employee name as a header (e.g. "**Name**") followed by their details indented below
-   - Use a sub-bullet (  -) for each certification or detail under an employee
-   - Include vendor, issue date, expiry date, and status for each certification when available
+   - Group results by employee: use the employee name as a bold header (e.g. "**Name**")
+   - Under each employee, list each certification as a top-level bullet: "- Certification Name"
+   - Under each certification bullet, add indented sub-bullets (2 spaces + dash) for its details:
+       "  - Vendor: Microsoft"
+       "  - Issued: 2020-06-23"
+       "  - Expires: 2025-06-23 (estimated)"
+       "  - Status: expired"
    - Separate each employee block with a blank line
 7. Be specific: list names and certification titles when found; avoid unnecessary hedging
 8. End your reply with 1-2 relevant follow-up suggestions the user might find useful — keep them concise
@@ -205,9 +209,13 @@ COMO RESPONDER:
 4. Responde sempre no MESMO IDIOMA da mensagem do utilizador
 5. Escreve num tom conversacional e útil — como um colega experiente
 6. FORMATAÇÃO — estrutura as respostas de forma clara:
-   - Agrupa os resultados por colaborador: usa o nome como cabeçalho (ex: "**Nome**") seguido dos detalhes indentados
-   - Usa um sub-marcador (  -) para cada certificação ou detalhe de um colaborador
-   - Inclui fornecedor, data de emissão, validade e estado de cada certificação quando disponível
+   - Agrupa os resultados por colaborador: usa o nome como cabeçalho em negrito (ex: "**Nome**")
+   - Para cada colaborador, lista cada certificação como um marcador de primeiro nível: "- Nome da Certificação"
+   - Sob cada marcador de certificação, adiciona sub-marcadores indentados (2 espaços + traço) com os detalhes:
+       "  - Fornecedor: Microsoft"
+       "  - Emissão: 2020-06-23"
+       "  - Validade: 2025-06-23 (estimada)"
+       "  - Estado: expired"
    - Separa cada bloco de colaborador com uma linha em branco
 7. Sê específico: lista nomes e títulos de certificações quando encontrados; não sejas desnecessariamente cauteloso
 8. Termina a resposta com 1-2 sugestões de perguntas de seguimento relevantes — mantém-nas concisas
@@ -267,8 +275,16 @@ def handle_user_query(
         prior = _STATE.get(state_key)
 
     language = preferred_language or _detect_language(query_text, prior)
+    logger.info(
+        "Agent: handling query (lang=%s, conv=%s) — %.80s", language, state_key, query_text
+    )
     client = _get_chat_client()
     if client is None or not settings.azure_openai_chat_deployment:
+        logger.warning(
+            "Agent: no LLM client (endpoint=%s, deployment=%s) — using fallback",
+            bool(settings.azure_openai_endpoint),
+            settings.azure_openai_chat_deployment or "<unset>",
+        )
         answer = _no_llm_fallback(language)
         _save_state(state_key, language, query_text, answer, prior)
         return AgentQueryResult(
@@ -298,6 +314,7 @@ def handle_user_query(
     tool_calls_log: list[dict] = []
     answer = ""
     for iteration in range(MAX_AGENT_ITERATIONS):
+        logger.debug("Agent: LLM call iteration %d (messages=%d)", iteration, len(messages))
         try:
             response = client.chat.completions.create(
                 model=settings.azure_openai_chat_deployment,
@@ -312,8 +329,18 @@ def handle_user_query(
             break
 
         msg = response.choices[0].message
+        finish_reason = getattr(response.choices[0], "finish_reason", None)
+        logger.debug(
+            "Agent: iteration %d — finish_reason=%s, tool_calls=%s",
+            iteration,
+            finish_reason,
+            len(msg.tool_calls) if msg.tool_calls else 0,
+        )
         if not msg.tool_calls:
             answer = (msg.content or "").strip()
+            logger.info(
+                "Agent: final answer produced on iteration %d (%d chars)", iteration, len(answer)
+            )
             break
 
         # Append assistant turn with tool calls
@@ -340,11 +367,15 @@ def handle_user_query(
                 args = json.loads(tool_call.function.arguments)
             except Exception:
                 args = {}
+            logger.debug("Agent: calling tool %s with args %s", tool_call.function.name, args)
             result = _dispatch_tool(tool_call.function.name, args)
             result_count = (
                 result.get("total_found", 0)
                 if isinstance(result, dict)
                 else 0
+            )
+            logger.debug(
+                "Agent: tool %s returned %d results", tool_call.function.name, result_count
             )
             tool_calls_log.append({
                 "tool": tool_call.function.name,
@@ -358,6 +389,10 @@ def handle_user_query(
             })
 
     if not answer:
+        logger.warning(
+            "Agent: loop ended with no answer after %d tool call(s) — returning fallback",
+            tool_call_count,
+        )
         answer = (
             "Não foi possível processar a sua pergunta. Por favor tente novamente."
             if language == "pt"
