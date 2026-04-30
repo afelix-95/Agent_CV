@@ -238,9 +238,15 @@ def download_cv_file(
     # Locally ingested file — serve from disk
     source_path = row["source_path"] or ""
     import os
-    pdf_root = settings.pdf_root
-    # source_path may be absolute or relative to pdf_root
-    candidate = source_path if os.path.isabs(source_path) else os.path.join(pdf_root, source_path)
+    # source_path is stored as the full relative path (e.g. "PDFs/REPOCV/file.pdf")
+    # Use it directly; it's relative to the app working directory (/app in Docker).
+    if os.path.isabs(source_path):
+        candidate = source_path
+    else:
+        candidate = os.path.join("/app", source_path) if os.path.sep == "/" else source_path
+    if not os.path.isfile(candidate):
+        # Fallback: filename only, look inside pdf_root
+        candidate = os.path.join(settings.pdf_root, os.path.basename(source_path))
     if not os.path.isfile(candidate):
         raise HTTPException(status_code=404, detail="File not found on disk")
 

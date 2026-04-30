@@ -211,6 +211,25 @@ class SharePointWatcher:
 
         # Strategy 2: enumerate root children and match by name (handles casing, etc.)
         target_name = folder.split("/")[0]  # top-level folder name
+
+        # First check if the drive itself is accessible
+        async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as _http:
+            drive_resp = await _http.get(
+                "https://graph.microsoft.com/v1.0/me/drive",
+                headers=headers,
+                params={"$select": "id,driveType,owner"},
+            )
+        if drive_resp.status_code != 200:
+            logger.error(
+                "SharePoint watcher: /me/drive not accessible — HTTP %s %s. "
+                "Ensure Files.Read (or Files.ReadWrite) is granted for the bot account.",
+                drive_resp.status_code,
+                drive_resp.text[:300],
+            )
+            return None
+
+        logger.debug("SharePoint watcher: drive info — %s", drive_resp.text[:200])
+
         async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as _http:
             children_resp = await _http.get(
                 "https://graph.microsoft.com/v1.0/me/drive/root/children",
