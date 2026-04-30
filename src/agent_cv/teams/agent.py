@@ -196,6 +196,11 @@ class TeamsWebhookBot:
         # Give uvicorn a moment to finish starting before Graph validates the URL
         await asyncio.sleep(5)
 
+        # Clean up any orphaned subscriptions from previous runs before creating a new one.
+        # Without this, every restart leaves a stale subscription that Graph may keep
+        # delivering to, or which can cause duplicate/missed notifications.
+        await self._cleanup_stale_subscriptions()
+
         # Retry up to 5 times with increasing back-off in case the server is
         # still not ready or Traefik hasn't finished routing yet
         for attempt in range(1, 6):
@@ -221,15 +226,74 @@ class TeamsWebhookBot:
 
         await self._renewal_loop(renew_interval)
 
+    async def _cleanup_stale_subscriptions(self) -> None:
+        """Delete any existing Graph subscriptions pointing at our notificationUrl.
+
+        This prevents duplicate delivery when the container restarts without a
+        graceful shutdown (e.g. after a rebuild or OOM kill).
+        """
+        try:
+            token = await asyncio.to_thread(get_access_token)
+            async with httpx.AsyncClient(timeout=15.0) as http:
+                resp = await http.get(
+                    "https://graph.microsoft.com/v1.0/subscriptions",
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+                if resp.status_code != 200:
+                    logger.warning(
+                        "Teams webhook bot: could not list subscriptions (HTTP %s) — skipping cleanup",
+                        resp.status_code,
+                    )
+                    return
+
+                our_url = f"{settings.webhook_base_url}/graph-notifications/teams"
+                stale = [
+                    s["id"]
+                    for s in resp.json().get("value", [])
+                    if s.get("notificationUrl", "").rstrip("/") == our_url.rstrip("/")
+                ]
+
+                for sub_id in stale:
+                    del_resp = await http.delete(
+                        f"https://graph.microsoft.com/v1.0/subscriptions/{sub_id}",
+                        headers={"Authorization": f"Bearer {token}"},
+                    )
+                    if del_resp.status_code in (200, 204):
+                        logger.info("Teams webhook bot: deleted stale subscription %s", sub_id)
+                    else:
+                        logger.warning(
+                            "Teams webhook bot: failed to delete stale subscription %s (HTTP %s)",
+                            sub_id,
+                            del_resp.status_code,
+                        )
+        except Exception:
+            logger.exception("Teams webhook bot: error during stale subscription cleanup")
+
     async def _renewal_loop(self, interval: int) -> None:
         while True:
             await asyncio.sleep(interval)
-            try:
-                await self._create_subscription()
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                logger.exception("Teams webhook bot: subscription renewal failed")
+            # Retry up to 5 times with back-off before giving up on this renewal cycle
+            for attempt in range(1, 6):
+                try:
+                    await self._create_subscription()
+                    break
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    if attempt == 5:
+                        logger.exception(
+                            "Teams webhook bot: subscription renewal failed after %d attempts — "
+                            "will retry at next interval",
+                            attempt,
+                        )
+                    else:
+                        wait = attempt * 15
+                        logger.warning(
+                            "Teams webhook bot: renewal attempt %d failed, retrying in %ds",
+                            attempt,
+                            wait,
+                        )
+                        await asyncio.sleep(wait)
 
     # ------------------------------------------------------------------ #
     # Notification handling (called from the webhook route)               #
