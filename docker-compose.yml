@@ -38,9 +38,18 @@ services:
     labels:
       - "traefik.enable=true"
       - "traefik.docker.network=${TRAEFIK_NETWORK:-traefik-public}"
-      - "traefik.http.routers.agent-cv.rule=Host(`${APP_DOMAIN}`)"
-      - "traefik.http.routers.agent-cv.entrypoints=websecure"
-      - "traefik.http.routers.agent-cv.tls=true"
+      # Dedicated high-priority routers for each app path — avoids conflict
+      # with other containers registered on the same hostname (e.g. n8n chatbot)
+      - "traefik.http.routers.agent-cv-webhook.rule=Host(`${APP_DOMAIN}`) && PathPrefix(`/graph-notifications`)"
+      - "traefik.http.routers.agent-cv-webhook.entrypoints=websecure"
+      - "traefik.http.routers.agent-cv-webhook.tls=true"
+      - "traefik.http.routers.agent-cv-webhook.service=agent-cv"
+      - "traefik.http.routers.agent-cv-webhook.priority=100"
+      - "traefik.http.routers.agent-cv-api.rule=Host(`${APP_DOMAIN}`) && PathPrefix(`/admin`, `/query`, `/teams`, `/health`, `/employees`, `/docs`, `/openapi`)"
+      - "traefik.http.routers.agent-cv-api.entrypoints=websecure"
+      - "traefik.http.routers.agent-cv-api.tls=true"
+      - "traefik.http.routers.agent-cv-api.service=agent-cv"
+      - "traefik.http.routers.agent-cv-api.priority=50"
       - "traefik.http.services.agent-cv.loadbalancer.server.port=8000"
 
 networks:
