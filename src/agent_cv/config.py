@@ -25,16 +25,8 @@ class Settings(BaseSettings):
     graph_user_password: str = ""
     # Space-separated delegated scopes; defaults to all admin-consented permissions
     graph_scopes: str = "https://graph.microsoft.com/.default"
-    # How often (in seconds) the polling bot checks for new messages (legacy, kept for compat)
+    # How often (in seconds) the polling bot checks for new messages
     graph_poll_interval: int = 5
-
-    # Microsoft Graph Change Notifications (webhook) settings
-    # Public HTTPS base URL of this service (e.g. https://agent-cv.example.com).
-    # Must be reachable by Microsoft Graph to deliver change notifications.
-    webhook_base_url: str = ""
-    # Random secret sent as clientState in Graph subscriptions; used to validate
-    # that incoming notifications originate from Graph (not a third party).
-    webhook_secret: str = ""
 
     # SharePoint document library watcher
     # Sharing link URL for the folder (e.g. from Share → Copy link in OneDrive/SharePoint).
@@ -52,6 +44,12 @@ class Settings(BaseSettings):
     sharepoint_poll_interval: int = 3600
     # Password for password-protected sharing links (set via X-Sharing-Link-Password header)
     sharepoint_password: str = ""
+
+    # Secure file download endpoint
+    # Base URL of this service as reachable by the Teams client (used to build CV download links).
+    # Defaults to WEBHOOK_BASE_URL when not set explicitly.
+    webhook_base_url: str = ""
+    file_download_secret: str = ""
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 

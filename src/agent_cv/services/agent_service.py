@@ -796,41 +796,42 @@ def _tool_list_employees() -> dict:
 
 
 def _tool_get_employee_cv_link(employee_name: str) -> dict:
-    """Return SharePoint URLs for a specific employee's CV documents."""
+    """Return download URLs for a specific employee's CV documents."""
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT e.full_name, sd.original_filename, sd.sharepoint_web_url
+                SELECT e.full_name, sd.document_id, sd.original_filename,
+                       sd.sharepoint_web_url, sd.sharepoint_item_id, sd.source_path
                 FROM source_documents sd
                 JOIN employees e ON sd.employee_id = e.employee_id
                 WHERE e.full_name ILIKE %s
-                  AND sd.sharepoint_web_url IS NOT NULL
                 ORDER BY sd.created_at DESC
                 """,
                 (f"%{employee_name}%",),
             )
             rows = cur.fetchall()
 
-    if rows:
+    if not rows:
         return {
-            "found": True,
-            "documents": [
-                {
-                    "employee": r["full_name"],
-                    "filename": r["original_filename"],
-                    "url": r["sharepoint_web_url"],
-                }
-                for r in rows
-            ],
+            "found": False,
+            "message": f"No CV found for '{employee_name}'. The document may not have been ingested yet.",
         }
-    return {
-        "found": False,
-        "message": (
-            f"No SharePoint CV link found for '{employee_name}'. "
-            "The document may not have been ingested from SharePoint yet."
-        ),
-    }
+
+    from agent_cv.api.routes import generate_cv_download_url
+
+    documents = []
+    for r in rows:
+        url = r["sharepoint_web_url"] or generate_cv_download_url(r["document_id"])
+        documents.append(
+            {
+                "employee": r["full_name"],
+                "filename": r["original_filename"],
+                "url": url,
+            }
+        )
+
+    return {"found": True, "documents": documents}
 
 
 def _tool_search_web(query: str) -> dict:
