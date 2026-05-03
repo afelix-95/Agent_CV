@@ -332,7 +332,6 @@ class TeamsWebhookBot:
             accepted = await self._accept_chat(chat_id)
             if accepted:
                 self._accepted_chats.add(chat_id)
-                await self._send_greeting(chat_id)
 
         client = get_graph_client()
         try:
@@ -425,35 +424,6 @@ class TeamsWebhookBot:
         except Exception:
             logger.exception("Teams webhook bot: failed to accept chat %s", chat_id)
             return False
-
-    async def _send_greeting(self, chat_id: str) -> None:
-        """Send an initial greeting to complete the federated-chat acceptance handshake."""
-        greeting = (
-            "Hello! I'm the CV Finder assistant. "
-            "Ask me to search for employees by certification, skill, or technology."
-        )
-        try:
-            token = await asyncio.to_thread(get_access_token)
-            async with httpx.AsyncClient(timeout=10.0) as http:
-                resp = await http.post(
-                    f"https://graph.microsoft.com/v1.0/chats/{chat_id}/messages",
-                    headers={
-                        "Authorization": f"Bearer {token}",
-                        "Content-Type": "application/json",
-                    },
-                    json={"body": {"contentType": "text", "content": greeting}},
-                )
-            if resp.status_code in (200, 201):
-                logger.info("Teams webhook bot: sent greeting to %s", chat_id)
-            else:
-                logger.warning(
-                    "Teams webhook bot: greeting failed HTTP %s for %s: %s",
-                    resp.status_code,
-                    chat_id,
-                    resp.text[:200],
-                )
-        except Exception:
-            logger.exception("Teams webhook bot: failed to send greeting to %s", chat_id)
 
     # ------------------------------------------------------------------ #
     # Message handling                                                     #

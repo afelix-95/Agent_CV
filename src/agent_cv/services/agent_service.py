@@ -151,6 +151,37 @@ TOOLS: list[dict] = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_csv_report",
+            "description": (
+                "Export a large list or table as a downloadable CSV file. "
+                "Use when a result set has more than ~30 rows and would be too long to display in chat. "
+                "Returns a download URL to share with the user."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title": {
+                        "type": "string",
+                        "description": "Descriptive filename for the export (without .csv extension), e.g. 'expired_certifications'",
+                    },
+                    "columns": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Ordered list of column header names",
+                    },
+                    "rows": {
+                        "type": "array",
+                        "items": {"type": "object"},
+                        "description": "Array of objects where each key matches a column name",
+                    },
+                },
+                "required": ["title", "columns", "rows"],
+            },
+        },
+    },
 ]
 
 # ------------------------------------------------------------------ #
@@ -169,6 +200,7 @@ TOOLS AVAILABLE:
 • list_employees — list all employees in the system
 • get_employee_cv_link — get the SharePoint link to an employee's CV document
 • search_web — look up external information about certifications or technologies
+• create_csv_report — export a large result set as a downloadable CSV file (use when results exceed ~30 rows)
 
 HOW TO RESPOND:
 1. For any data query, use tools FIRST — never answer from memory or make assumptions
@@ -188,11 +220,16 @@ HOW TO RESPOND:
 7. Be specific: list names and certification titles when found; avoid unnecessary hedging
 8. End your reply with 1-2 relevant follow-up suggestions the user might find useful — keep them concise
 9. If tools return no data, say clearly what you searched for and suggest alternatives
-10. ALWAYS write exclusively in Latin script — never output characters from Georgian, Arabic, Cyrillic, Greek, or any other non-Latin alphabet, even as abbreviations or parenthetical notes
-11. When the user asks to see or share an employee's CV, call get_employee_cv_link and include the returned URL as a plain hyperlink in your reply
-12. When answering questions about expired or expiring certifications, ALWAYS call search_certifications with status="any" — never pre-filter to "expired" or "expiring" in the tool call. Filter and categorise in your answer instead, to avoid incomplete results.
+10. ALWAYS write exclusively in Latin script — never output characters from Georgian, Arabic, Cyrillic, Greek, or any other non-Latin alphabet, even as abbreviations or parenthetical notes. Accented Latin characters (e.g. é, ã, ç, ó, á, â, ê, ô, í, ú, à, õ) are standard Latin script and MUST be used correctly — do not strip or replace them with unaccented equivalents.
+11. When the user asks to see or share an employee's CV, call get_employee_cv_link and include the returned URL as a plain hyperlink in your reply. Share only the CV document itself — do not include certification verification letters or other supplementary files.
+12. When answering questions about expired or expiring certifications, ALWAYS call search_certifications with status="any" — never pre-filter to "expired" or "expiring" in the tool call. After retrieving results, apply the following filtering rules:
+    - EXPIRED: include only certs where status='expired' OR inferred_expiry_date is a past date (before today)
+    - Do NOT include certs where inferred_expiry_date is null (these never expire)
+    - Do NOT include certs where inferred_expiry_date is 'unknown' (expiry cannot be determined)
+    - Do NOT include certs where inferred_expiry_date is a future date (these are "soon to expire", not expired — include them only if the user explicitly asks for expiring/soon-to-expire certs)
 13. Certification results include an "inferred_expiry_date" field for records where the expiry date was not registered. If this field is a date (not null or "unknown"), use it as an estimated expiry and clearly label it as "estimated" or "inferred" in your answer. If it is null, the cert does not expire. If it is "unknown", you cannot infer an expiry date for that record.
 14. PAGINATION — search_certifications returns 15 results per page. When has_more=true in the result, tell the user how many results remain and offer to show more. When the user asks to see more results (e.g. "show more", "next", "ver mais"), call search_certifications again with the same query/status and offset=next_offset from the previous result.
+15. When any result set (certifications, employees, or any other list/table) would produce more than ~30 rows, use the create_csv_report tool instead of outputting the full table in chat. Collect all data first using pagination as needed, then call create_csv_report with all the rows and reply with a brief message explaining the file was generated because the results were too large for chat, along with the download link.
 """
 
 _SYSTEM_PROMPT_PT = """\
@@ -207,6 +244,7 @@ FERRAMENTAS DISPONÍVEIS:
 • list_employees — listar todos os colaboradores no sistema
 • get_employee_cv_link — obter o link do SharePoint para o CV de um colaborador
 • search_web — pesquisar informação externa sobre certificações ou tecnologias
+• create_csv_report — exportar um conjunto de resultados grande como ficheiro CSV descarregável (usar quando os resultados excedem ~30 linhas)
 
 COMO RESPONDER:
 1. Para qualquer pergunta sobre dados, usa as ferramentas PRIMEIRO — nunca adivinhes
@@ -226,11 +264,16 @@ COMO RESPONDER:
 7. Sê específico: lista nomes e títulos de certificações quando encontrados; não sejas desnecessariamente cauteloso
 8. Termina a resposta com 1-2 sugestões de perguntas de seguimento relevantes — mantém-nas concisas
 9. Se as ferramentas não retornarem dados, diz claramente o que pesquisaste e sugere alternativas
-10. Escreve SEMPRE exclusivamente em alfabeto latino — nunca uses caracteres do alfabeto georgiano, árabe, cirílico, grego ou qualquer outro alfabeto não-latino, mesmo em abreviaturas ou notas
-11. Quando o utilizador pedir para ver ou partilhar o CV de um colaborador, usa get_employee_cv_link e inclui o URL retornado como hiperligação na tua resposta
-12. Quando responderes a perguntas sobre certificações vencidas ou a vencer, usa SEMPRE search_certifications com status="any" — nunca pré-filtres para "expired" ou "expiring" na chamada da ferramenta. Filtra e categoriza na tua resposta, para evitar resultados incompletos.
+10. Escreve SEMPRE exclusivamente em alfabeto latino — nunca uses caracteres do alfabeto georgiano, árabe, cirílico, grego ou qualquer outro alfabeto não-latino, mesmo em abreviaturas ou notas. Caracteres latinos acentuados (ex: é, ã, ç, ó, á, â, ê, ô, í, ú, à, õ) fazem parte do alfabeto latino e DEVEM ser usados corretamente — nunca os omitas ou substituas por versões sem acento. Em português, usa sempre a acentuação correta.
+11. Quando o utilizador pedir para ver ou partilhar o CV de um colaborador, usa get_employee_cv_link e inclui o URL retornado como hiperligação na tua resposta. Partilha apenas o documento de CV — não incluas cartas de verificação de certificações nem outros documentos suplementares.
+12. Quando responderes a perguntas sobre certificações vencidas ou a vencer, usa SEMPRE search_certifications com status="any" — nunca pré-filtres para "expired" ou "expiring" na chamada da ferramenta. Após obter os resultados, aplica as seguintes regras de filtragem:
+    - VENCIDAS: inclui apenas certificações com status='expired' OU inferred_expiry_date com uma data no passado (anterior a hoje)
+    - NÃO incluas certificações com inferred_expiry_date nulo (estas não expiram)
+    - NÃO incluas certificações com inferred_expiry_date igual a 'unknown' (não é possível determinar a validade)
+    - NÃO incluas certificações com inferred_expiry_date no futuro (estas estão "a vencer em breve", não vencidas — inclui-as apenas se o utilizador pedir explicitamente certificações a vencer)
 13. Os resultados de certificações incluem um campo "inferred_expiry_date" para registos em que a data de validade não foi registada. Se este campo contiver uma data (não nulo nem "unknown"), usa-a como validade estimada e indica claramente que é uma estimativa na tua resposta. Se for nulo, a certificação não expira. Se for "unknown", não é possível inferir a data de validade desse registo.
 14. PAGINAÇÃO — search_certifications devolve 15 resultados por página. Quando has_more=true no resultado, informa o utilizador de quantos resultados restam e oferece mostrar mais. Quando o utilizador pedir para ver mais resultados (ex: "mostrar mais", "ver mais", "próximos"), chama search_certifications novamente com o mesmo query/status e offset=next_offset do resultado anterior.
+15. Quando qualquer conjunto de resultados (certificações, colaboradores ou qualquer outra lista/tabela) produzir mais de ~30 linhas, usa a ferramenta create_csv_report em vez de apresentar a tabela completa no chat. Recolhe todos os dados primeiro usando paginação conforme necessário, depois chama create_csv_report com todas as linhas e responde com uma mensagem breve a explicar que o ficheiro foi gerado porque os resultados eram demasiados para o chat, juntamente com o link de transferência.
 """
 
 
@@ -335,7 +378,30 @@ def handle_user_query(
                 temperature=0.3,
                 max_completion_tokens=2048,
             )
-        except Exception:
+        except Exception as exc:
+            # Detect Azure content-filter rejections and surface a clean error instead
+            # of silently falling through to the generic "no answer" fallback.
+            exc_str = str(exc)
+            if "content_filter" in exc_str or "ResponsibleAIPolicyViolation" in exc_str:
+                logger.error(
+                    "Agent loop: content filter triggered on iteration %d — returning partial answer if available",
+                    iteration,
+                )
+                if answer_parts:
+                    # Return whatever was accumulated before the filter triggered
+                    answer = "\n".join(answer_parts)
+                    if language == "pt":
+                        answer += (
+                            "\n\n*(A resposta foi interrompida porque o contexto acumulado "
+                            "excedeu os limites do serviço. Tente reformular o pedido com "
+                            "um âmbito mais restrito.)*"
+                        )
+                    else:
+                        answer += (
+                            "\n\n*(Response was cut short because the accumulated context "
+                            "exceeded the service limits. Try rephrasing with a narrower scope.)*"
+                        )
+                break
             logger.exception("Agent loop: LLM call failed on iteration %d", iteration)
             break
 
@@ -367,11 +433,9 @@ def handle_user_query(
                     )
                 messages.append({"role": "assistant", "content": msg.content or ""})
                 continuation_prompt = (
-                    "Continua a tua resposta anterior diretamente, exatamente de onde ficou. "
-                    "Não repitas nada do que já foi escrito."
+                    "Continue a partir do ponto de corte."
                     if language == "pt"
-                    else "Continue your previous response directly from exactly where it was cut off. "
-                    "Do not repeat any content already written."
+                    else "Continue from where you left off."
                 )
                 messages.append({"role": "user", "content": continuation_prompt})
                 continue
@@ -479,6 +543,12 @@ def _dispatch_tool(name: str, args: dict) -> Any:
             return _tool_get_employee_cv_link(args.get("employee_name", ""))
         if name == "search_web":
             return _tool_search_web(args.get("query", ""))
+        if name == "create_csv_report":
+            return _tool_create_csv_report(
+                title=args.get("title", "export"),
+                columns=args.get("columns", []),
+                rows=args.get("rows", []),
+            )
     except Exception:
         logger.exception("Agent: tool %s raised an exception with args %s", name, args)
         return {"error": f"Tool '{name}' failed unexpectedly"}
@@ -842,6 +912,11 @@ def _tool_get_employee_cv_link(employee_name: str) -> dict:
                 FROM source_documents sd
                 JOIN employees e ON sd.employee_id = e.employee_id
                 WHERE e.full_name ILIKE %s
+                  AND EXISTS (
+                    SELECT 1 FROM document_versions dv
+                    JOIN cv_sections cs ON cs.document_version_id = dv.document_version_id
+                    WHERE dv.document_id = sd.document_id AND dv.is_current = true
+                  )
                 ORDER BY sd.created_at DESC
                 """,
                 (f"%{employee_name}%",),
@@ -894,6 +969,44 @@ def _tool_search_web(query: str) -> dict:
         if len(hits) >= 5:
             break
     return {"results": hits[:5]}
+
+
+def _tool_create_csv_report(
+    title: str,
+    columns: list[str],
+    rows: list[dict],
+) -> dict:
+    """Write rows to a temporary CSV file and return a signed download URL."""
+    import csv
+    import os
+    import re
+    import uuid
+
+    from agent_cv.api.routes import generate_export_url
+
+    # Sanitise title to a safe filename (keep alphanumeric, dashes, underscores)
+    safe_title = re.sub(r"[^\w\-]", "_", title.strip()) or "export"
+    export_id = str(uuid.uuid4())
+    export_dir = "/tmp/agent_cv_exports"
+    os.makedirs(export_dir, exist_ok=True)
+    csv_path = os.path.join(export_dir, f"{export_id}.csv")
+
+    try:
+        with open(csv_path, "w", newline="", encoding="utf-8-sig") as f:
+            writer = csv.DictWriter(f, fieldnames=columns, extrasaction="ignore")
+            writer.writeheader()
+            writer.writerows(rows)
+    except Exception:
+        logger.exception("Agent: create_csv_report failed to write %s", csv_path)
+        return {"error": "Failed to generate CSV file"}
+
+    url = generate_export_url(export_id)
+    logger.info("Agent: created CSV export %s with %d rows", export_id, len(rows))
+    return {
+        "url": url,
+        "filename": f"{safe_title}.csv",
+        "row_count": len(rows),
+    }
 
 
 # ------------------------------------------------------------------ #
