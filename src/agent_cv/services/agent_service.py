@@ -16,7 +16,7 @@ from agent_cv.services.query_service import QueryAnalysis, normalize_text
 
 logger = logging.getLogger(__name__)
 
-MAX_AGENT_ITERATIONS = 5
+MAX_AGENT_ITERATIONS = 12
 
 # ------------------------------------------------------------------ #
 # Tool schema                                                          #
@@ -320,6 +320,10 @@ def handle_user_query(
     tool_call_count = 0
     tool_calls_log: list[dict] = []
     answer = ""
+    answer_parts: list[str] = []
+    # How many consecutive length-truncated continuations we allow before giving up
+    _MAX_CONTINUATIONS = 4
+    continuation_count = 0
     for iteration in range(MAX_AGENT_ITERATIONS):
         logger.debug("Agent: LLM call iteration %d (messages=%d)", iteration, len(messages))
         try:
@@ -344,9 +348,41 @@ def handle_user_query(
             len(msg.tool_calls) if msg.tool_calls else 0,
         )
         if not msg.tool_calls:
-            answer = (msg.content or "").strip()
+            chunk = (msg.content or "").strip()
+            if finish_reason == "length" and continuation_count < _MAX_CONTINUATIONS:
+                # LLM was cut off mid-response — save the partial content and ask it to continue
+                continuation_count += 1
+                if chunk:
+                    answer_parts.append(chunk)
+                    logger.debug(
+                        "Agent: finish_reason=length at iteration %d (part %d, %d chars) — requesting continuation",
+                        iteration,
+                        continuation_count,
+                        len(chunk),
+                    )
+                else:
+                    logger.debug(
+                        "Agent: finish_reason=length at iteration %d with empty chunk — requesting continuation",
+                        iteration,
+                    )
+                messages.append({"role": "assistant", "content": msg.content or ""})
+                continuation_prompt = (
+                    "Continua a tua resposta anterior diretamente, exatamente de onde ficou. "
+                    "Não repitas nada do que já foi escrito."
+                    if language == "pt"
+                    else "Continue your previous response directly from exactly where it was cut off. "
+                    "Do not repeat any content already written."
+                )
+                messages.append({"role": "user", "content": continuation_prompt})
+                continue
+            if chunk:
+                answer_parts.append(chunk)
+            answer = "\n".join(answer_parts)
             logger.info(
-                "Agent: final answer produced on iteration %d (%d chars)", iteration, len(answer)
+                "Agent: final answer produced on iteration %d (%d chars, %d part(s))",
+                iteration,
+                len(answer),
+                len(answer_parts),
             )
             break
 

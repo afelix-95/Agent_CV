@@ -472,6 +472,7 @@ class TeamsWebhookBot:
         from msgraph.generated.models.item_body import ItemBody
 
         started = time.perf_counter()
+        result = None
         try:
             result = await asyncio.to_thread(handle_user_query, text, None, chat_id)
         except Exception:
@@ -503,11 +504,23 @@ class TeamsWebhookBot:
             )
 
         try:
-            reply = ChatMessage(body=ItemBody(
-                content=_text_to_html(reply_text),
-                content_type=BodyType.Html,
-            ))
-            await client.chats.by_chat_id(chat_id).messages.post(reply)
+            reply_chunks = _split_into_chunks(reply_text)
+            _result_lang = getattr(result, "language", "en")
+            for chunk_index, chunk in enumerate(reply_chunks):
+                if len(reply_chunks) > 1:
+                    label = (
+                        f"*Parte {chunk_index + 1}/{len(reply_chunks)}*\n\n"
+                        if _result_lang == "pt"
+                        else f"*Part {chunk_index + 1}/{len(reply_chunks)}*\n\n"
+                    )
+                    chunk = label + chunk
+                reply = ChatMessage(body=ItemBody(
+                    content=_text_to_html(chunk),
+                    content_type=BodyType.Html,
+                ))
+                await client.chats.by_chat_id(chat_id).messages.post(reply)
+                if chunk_index < len(reply_chunks) - 1:
+                    await asyncio.sleep(0.3)
         except Exception:
             logger.exception(
                 "Teams webhook bot: failed to post reply for message %s", msg_id
@@ -727,6 +740,42 @@ def _text_to_html(text: str) -> str:
     close_lists()
 
     return "".join(parts)
+
+
+# Maximum characters per Teams message. Teams supports large HTML bodies, but
+# keeping chunks reasonable improves readability and avoids API edge cases.
+_MAX_CHUNK_CHARS = 12_000
+
+
+def _split_into_chunks(text: str) -> list[str]:
+    """Split a markdown response into chunks at double-newline (paragraph) boundaries.
+
+    Tries to keep each chunk under _MAX_CHUNK_CHARS. Falls back to splitting on
+    single newlines if a single paragraph is itself oversized.
+    """
+    if len(text) <= _MAX_CHUNK_CHARS:
+        return [text]
+
+    paragraphs = text.split("\n\n")
+    chunks: list[str] = []
+    current: list[str] = []
+    current_len = 0
+
+    for para in paragraphs:
+        # +2 for the "\n\n" separator we'll add between paragraphs
+        needed = len(para) + (2 if current else 0)
+        if current and current_len + needed > _MAX_CHUNK_CHARS:
+            chunks.append("\n\n".join(current))
+            current = [para]
+            current_len = len(para)
+        else:
+            current.append(para)
+            current_len += needed
+
+    if current:
+        chunks.append("\n\n".join(current))
+
+    return chunks or [text]
 
 
 def _build_reply(result: object) -> str:
