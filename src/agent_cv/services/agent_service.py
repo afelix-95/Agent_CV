@@ -154,10 +154,45 @@ TOOLS: list[dict] = [
     {
         "type": "function",
         "function": {
+            "name": "export_certifications_csv",
+            "description": (
+                "Export certification data to a downloadable CSV file. "
+                "Handles all data fetching, expiry filtering, and CSV generation server-side in a SINGLE call "
+                "— no pagination needed. Use this whenever the user asks to export, download, or view all "
+                "certifications (or filtered subset) as a table or file. "
+                "Prefer this over paginating search_certifications for any bulk export."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Optional: filter by technology, vendor, or certification name. Leave empty or use '*' to include all certifications.",
+                    },
+                    "expired_only": {
+                        "type": "boolean",
+                        "description": "If true, include only certifications that are expired (status='expired') or whose inferred expiry date is in the past. Default: false.",
+                    },
+                    "employee_name": {
+                        "type": "string",
+                        "description": "Optional: filter to a specific employee by name.",
+                    },
+                    "title": {
+                        "type": "string",
+                        "description": "Descriptive filename for the export (without .csv extension), e.g. 'expired_certifications'.",
+                    },
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "create_csv_report",
             "description": (
-                "Export a large list or table as a downloadable CSV file. "
-                "Use when a result set has more than ~30 rows and would be too long to display in chat. "
+                "Export a non-certification list or table as a downloadable CSV file. "
+                "Use for employee lists or other data (NOT certifications — use export_certifications_csv for those). "
                 "Returns a download URL to share with the user."
             ),
             "parameters": {
@@ -200,7 +235,8 @@ TOOLS AVAILABLE:
 • list_employees — list all employees in the system
 • get_employee_cv_link — get the SharePoint link to an employee's CV document
 • search_web — look up external information about certifications or technologies
-• create_csv_report — export a large result set as a downloadable CSV file (use when results exceed ~30 rows)
+• export_certifications_csv — export certifications to a downloadable CSV file; handles all filtering server-side in ONE call (use for any certification export/bulk request)
+• create_csv_report — export non-certification lists (e.g. employee lists) as a downloadable CSV file
 
 HOW TO RESPOND:
 1. For any data query, use tools FIRST — never answer from memory or make assumptions
@@ -229,7 +265,10 @@ HOW TO RESPOND:
     - Do NOT include certs where inferred_expiry_date is a future date (these are "soon to expire", not expired — include them only if the user explicitly asks for expiring/soon-to-expire certs)
 13. Certification results include an "inferred_expiry_date" field for records where the expiry date was not registered. If this field is a date (not null or "unknown"), use it as an estimated expiry and clearly label it as "estimated" or "inferred" in your answer. If it is null, the cert does not expire. If it is "unknown", you cannot infer an expiry date for that record.
 14. PAGINATION — search_certifications returns 15 results per page. When has_more=true in the result, tell the user how many results remain and offer to show more. When the user asks to see more results (e.g. "show more", "next", "ver mais"), call search_certifications again with the same query/status and offset=next_offset from the previous result.
-15. When any result set (certifications, employees, or any other list/table) would produce more than ~30 rows, use the create_csv_report tool instead of outputting the full table in chat. Collect all data first using pagination as needed, then call create_csv_report with all the rows and reply with a brief message explaining the file was generated because the results were too large for chat, along with the download link.
+15. BULK EXPORTS — when the user asks to export, download, or compile all certifications into a table or file:
+    - For certification data: call export_certifications_csv ONCE with the appropriate filters (e.g. expired_only=true for expired certs). Do NOT paginate search_certifications to collect data for an export.
+    - For non-certification lists (e.g. all employees): use create_csv_report after collecting the data.
+    - Reply with a brief message explaining the file was generated because the results are too large for chat, along with the download link.
 """
 
 _SYSTEM_PROMPT_PT = """\
@@ -244,7 +283,8 @@ FERRAMENTAS DISPONÍVEIS:
 • list_employees — listar todos os colaboradores no sistema
 • get_employee_cv_link — obter o link do SharePoint para o CV de um colaborador
 • search_web — pesquisar informação externa sobre certificações ou tecnologias
-• create_csv_report — exportar um conjunto de resultados grande como ficheiro CSV descarregável (usar quando os resultados excedem ~30 linhas)
+• export_certifications_csv — exportar certificações para um ficheiro CSV descarregável; trata toda a filtragem no servidor numa ÚNICA chamada (usar para qualquer exportação de certificações)
+• create_csv_report — exportar listas não relacionadas com certificações (ex: lista de colaboradores) como ficheiro CSV descarregável
 
 COMO RESPONDER:
 1. Para qualquer pergunta sobre dados, usa as ferramentas PRIMEIRO — nunca adivinhes
@@ -273,7 +313,10 @@ COMO RESPONDER:
     - NÃO incluas certificações com inferred_expiry_date no futuro (estas estão "a vencer em breve", não vencidas — inclui-as apenas se o utilizador pedir explicitamente certificações a vencer)
 13. Os resultados de certificações incluem um campo "inferred_expiry_date" para registos em que a data de validade não foi registada. Se este campo contiver uma data (não nulo nem "unknown"), usa-a como validade estimada e indica claramente que é uma estimativa na tua resposta. Se for nulo, a certificação não expira. Se for "unknown", não é possível inferir a data de validade desse registo.
 14. PAGINAÇÃO — search_certifications devolve 15 resultados por página. Quando has_more=true no resultado, informa o utilizador de quantos resultados restam e oferece mostrar mais. Quando o utilizador pedir para ver mais resultados (ex: "mostrar mais", "ver mais", "próximos"), chama search_certifications novamente com o mesmo query/status e offset=next_offset do resultado anterior.
-15. Quando qualquer conjunto de resultados (certificações, colaboradores ou qualquer outra lista/tabela) produzir mais de ~30 linhas, usa a ferramenta create_csv_report em vez de apresentar a tabela completa no chat. Recolhe todos os dados primeiro usando paginação conforme necessário, depois chama create_csv_report com todas as linhas e responde com uma mensagem breve a explicar que o ficheiro foi gerado porque os resultados eram demasiados para o chat, juntamente com o link de transferência.
+15. EXPORTAÇÕES — quando o utilizador pedir para exportar, descarregar ou compilar certificações numa tabela ou ficheiro:
+    - Para dados de certificações: chama export_certifications_csv UMA VEZ com os filtros adequados (ex: expired_only=true para vencidas). NÃO uses paginação com search_certifications para recolher dados para uma exportação.
+    - Para listas não relacionadas com certificações (ex: todos os colaboradores): usa create_csv_report depois de recolher os dados.
+    - Responde com uma mensagem breve a explicar que o ficheiro foi gerado porque os resultados são demasiados para o chat, juntamente com o link de transferência.
 """
 
 
@@ -539,6 +582,13 @@ def _dispatch_tool(name: str, args: dict) -> Any:
             return _tool_get_employee_profile(args.get("employee_name", ""))
         if name == "list_employees":
             return _tool_list_employees()
+        if name == "export_certifications_csv":
+            return _tool_export_certifications_csv(
+                query=args.get("query", ""),
+                expired_only=bool(args.get("expired_only", False)),
+                employee_name=args.get("employee_name"),
+                title=args.get("title"),
+            )
         if name == "get_employee_cv_link":
             return _tool_get_employee_cv_link(args.get("employee_name", ""))
         if name == "search_web":
@@ -945,12 +995,193 @@ def _tool_get_employee_cv_link(employee_name: str) -> dict:
     return {"found": True, "documents": documents}
 
 
+def _sql_export_certifications(
+    query: str,
+    employee_name: str | None,
+) -> list[dict]:
+    """Fetch ALL matching certifications with no page-size cap (up to 10 000 rows).
+
+    Used by export_certifications_csv so the server-side export is never
+    limited by the 200-row cap that _sql_search_certifications applies for
+    interactive pagination.
+    """
+    _GENERIC_TOKENS = {
+        "all", "any", "expired", "expiring", "active", "certification",
+        "certifications", "certificacao", "certificacoes", "certificate",
+        "certificates", "list", "show", "give", "get", "find", "search",
+        "employee", "employees", "colaborador", "colaboradores", "todas",
+        "todos", "vencidas", "vencidos", "validade", "status", "with", "has",
+        "that", "are", "the", "and", "for", "por", "com", "que", "dos", "das",
+    }
+
+    norm = normalize_text(query or "")
+    raw_tokens = [t for t in norm.split() if len(t) >= 3][:6]
+    tokens = [t for t in raw_tokens if t not in _GENERIC_TOKENS]
+
+    where_parts: list[str] = []
+    params: list[Any] = []
+
+    if employee_name:
+        where_parts.append("lower(e.full_name) like %s")
+        params.append(f"%{normalize_text(employee_name)}%")
+
+    if tokens:
+        token_clauses: list[str] = []
+        for token in tokens:
+            token_clauses.append(
+                "(lower(c.cert_name) like %s "
+                "or lower(coalesce(v.vendor_name, '')) like %s "
+                "or lower(e.full_name) like %s)"
+            )
+            params.extend([f"%{token}%", f"%{token}%", f"%{token}%"])
+        where_parts.append("(" + " or ".join(token_clauses) + ")")
+
+    sql = """
+        select
+            e.full_name as employee_name,
+            c.cert_name as certification_name,
+            coalesce(v.vendor_name, 'Unknown') as vendor,
+            c.status,
+            c.issue_date,
+            c.expiry_date
+        from certifications c
+        join employees e on e.employee_id = c.employee_id
+        left join vendors v on v.vendor_id = c.vendor_id
+    """
+    if where_parts:
+        sql += " where " + " and ".join(where_parts)
+    sql += " order by e.full_name, c.expiry_date nulls last limit 10000"
+
+    try:
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+                rows = [dict(row) for row in cur.fetchall()]
+    except Exception:
+        logger.exception("Agent: _sql_export_certifications failed")
+        return []
+
+    # Enrich with inferred expiry dates (same logic as _sql_search_certifications)
+    for row in rows:
+        if row.get("expiry_date") is None and row.get("issue_date") is not None:
+            inferred = _infer_expiry_date(
+                row.get("certification_name", ""),
+                row.get("vendor", ""),
+                row["issue_date"],
+            )
+            row["inferred_expiry_date"] = inferred
+            row["expiry_date_is_inferred"] = inferred is not None
+        else:
+            row["inferred_expiry_date"] = None
+            row["expiry_date_is_inferred"] = False
+
+    return rows
+
+
+def _tool_export_certifications_csv(
+    query: str = "",
+    expired_only: bool = False,
+    employee_name: str | None = None,
+    title: str | None = None,
+) -> dict:
+    """Fetch all matching certifications, apply expiry filtering, and export to CSV.
+
+    Does everything server-side in a single call — no LLM-side pagination needed.
+    """
+    import csv
+    import datetime
+    import os
+    import re
+    import uuid
+
+    from agent_cv.api.routes import generate_export_url
+
+    rows = _sql_export_certifications(query or "", employee_name)
+    today = datetime.date.today()
+
+    if expired_only:
+        filtered: list[dict] = []
+        for row in rows:
+            # Already explicitly marked expired by the extractor
+            if row.get("status") == "expired":
+                filtered.append(row)
+                continue
+            # Recorded expiry date is in the past
+            expiry = row.get("expiry_date")
+            if expiry is not None:
+                d = expiry if isinstance(expiry, datetime.date) else None
+                if d and d < today:
+                    filtered.append(row)
+                continue
+            # No recorded expiry — check inferred date
+            inferred = row.get("inferred_expiry_date")
+            if isinstance(inferred, datetime.date) and inferred < today:
+                filtered.append(row)
+        rows = filtered
+
+    if not rows:
+        return {
+            "found": False,
+            "message": "No certifications found matching the given filters.",
+        }
+
+    safe_title = re.sub(r"[^\w\-]", "_", (title or "certifications").strip()) or "certifications"
+    export_id = str(uuid.uuid4())
+    export_dir = "/tmp/agent_cv_exports"
+    os.makedirs(export_dir, exist_ok=True)
+    csv_path = os.path.join(export_dir, f"{export_id}.csv")
+
+    columns = [
+        "employee_name", "certification_name", "vendor",
+        "status", "issue_date", "expiry_date", "inferred_expiry_date",
+    ]
+
+    def _fmt_date(v: object) -> str:
+        if v is None:
+            return ""
+        if v == "unknown":
+            return "unknown"
+        return str(v)
+
+    try:
+        with open(csv_path, "w", newline="", encoding="utf-8-sig") as f:
+            writer = csv.DictWriter(f, fieldnames=columns, extrasaction="ignore")
+            writer.writeheader()
+            for row in rows:
+                writer.writerow({
+                    "employee_name": row.get("employee_name", ""),
+                    "certification_name": row.get("certification_name", ""),
+                    "vendor": row.get("vendor", ""),
+                    "status": row.get("status", ""),
+                    "issue_date": _fmt_date(row.get("issue_date")),
+                    "expiry_date": _fmt_date(row.get("expiry_date")),
+                    "inferred_expiry_date": (
+                        "N/A" if row.get("inferred_expiry_date") is None
+                        else _fmt_date(row.get("inferred_expiry_date"))
+                    ),
+                })
+    except Exception:
+        logger.exception("Agent: export_certifications_csv failed to write %s", csv_path)
+        return {"error": "Failed to generate CSV file"}
+
+    url = generate_export_url(export_id)
+    logger.info(
+        "Agent: created certifications CSV export %s — %d rows (expired_only=%s)",
+        export_id, len(rows), expired_only,
+    )
+    return {
+        "url": url,
+        "filename": f"{safe_title}.csv",
+        "row_count": len(rows),
+    }
+
+
 def _tool_search_web(query: str) -> dict:
-    url = "https://api.duckduckgo.com/"
+    _url = "https://api.duckduckgo.com/"
     params = {"q": query, "format": "json", "no_redirect": 1, "skip_disambig": 1}
     try:
         with httpx.Client(timeout=6.0) as http:
-            response = http.get(url, params=params)
+            response = http.get(_url, params=params)
             response.raise_for_status()
             body = response.json()
     except Exception:
