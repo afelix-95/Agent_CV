@@ -217,6 +217,31 @@ TOOLS: list[dict] = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "translate_cv_to_pdf",
+            "description": (
+                "Translate an employee's CV into a target language and generate a downloadable PDF "
+                "in the Europass format. Use this whenever the user asks to translate a CV into "
+                "another language. Returns a signed download URL for the generated PDF."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "employee_name": {
+                        "type": "string",
+                        "description": "Full or partial name of the employee whose CV should be translated",
+                    },
+                    "target_language": {
+                        "type": "string",
+                        "description": "ISO 639-1 language code to translate into (e.g. 'en', 'pt', 'es', 'fr', 'de')",
+                    },
+                },
+                "required": ["employee_name", "target_language"],
+            },
+        },
+    },
 ]
 
 # ------------------------------------------------------------------ #
@@ -237,6 +262,7 @@ TOOLS AVAILABLE:
 • search_web — look up external information about certifications or technologies
 • export_certifications_csv — export certifications to a downloadable CSV file; handles all filtering server-side in ONE call (use for any certification export/bulk request)
 • create_csv_report — export non-certification lists (e.g. employee lists) as a downloadable CSV file
+• translate_cv_to_pdf — translate an employee's CV into a target language and generate a Europass-format PDF; returns a signed download URL
 
 HOW TO RESPOND:
 1. For any data query, use tools FIRST — never answer from memory or make assumptions
@@ -269,6 +295,10 @@ HOW TO RESPOND:
     - For certification data: call export_certifications_csv ONCE with the appropriate filters (e.g. expired_only=true for expired certs). Do NOT paginate search_certifications to collect data for an export.
     - For non-certification lists (e.g. all employees): use create_csv_report after collecting the data.
     - Reply with a brief message explaining the file was generated because the results are too large for chat, along with the download link.
+16. CV TRANSLATION — when the user asks to translate an employee's CV into another language:
+    - Call translate_cv_to_pdf with the employee's name and the target language ISO 639-1 code.
+    - Infer the language code from the user's request (e.g. "French" → "fr", "Portuguese" → "pt", "Spanish" → "es").
+    - Reply with a brief message and include the returned download URL as a hyperlink.
 """
 
 _SYSTEM_PROMPT_PT = """\
@@ -285,6 +315,7 @@ FERRAMENTAS DISPONÍVEIS:
 • search_web — pesquisar informação externa sobre certificações ou tecnologias
 • export_certifications_csv — exportar certificações para um ficheiro CSV descarregável; trata toda a filtragem no servidor numa ÚNICA chamada (usar para qualquer exportação de certificações)
 • create_csv_report — exportar listas não relacionadas com certificações (ex: lista de colaboradores) como ficheiro CSV descarregável
+• translate_cv_to_pdf — traduzir o CV de um colaborador para outro idioma e gerar um PDF no formato Europass; devolve um URL de transferência assinado
 
 COMO RESPONDER:
 1. Para qualquer pergunta sobre dados, usa as ferramentas PRIMEIRO — nunca adivinhes
@@ -317,6 +348,10 @@ COMO RESPONDER:
     - Para dados de certificações: chama export_certifications_csv UMA VEZ com os filtros adequados (ex: expired_only=true para vencidas). NÃO uses paginação com search_certifications para recolher dados para uma exportação.
     - Para listas não relacionadas com certificações (ex: todos os colaboradores): usa create_csv_report depois de recolher os dados.
     - Responde com uma mensagem breve a explicar que o ficheiro foi gerado porque os resultados são demasiados para o chat, juntamente com o link de transferência.
+16. TRADUÇÃO DE CV — quando o utilizador pedir para traduzir o CV de um colaborador para outro idioma:
+    - Chama translate_cv_to_pdf com o nome do colaborador e o código ISO 639-1 do idioma de destino.
+    - Infere o código do idioma a partir do pedido do utilizador (ex: "francês" → "fr", "inglês" → "en", "espanhol" → "es").
+    - Responde com uma mensagem breve e inclui o URL de transferência devolvido como hiperligação.
 """
 
 
@@ -598,6 +633,11 @@ def _dispatch_tool(name: str, args: dict) -> Any:
                 title=args.get("title", "export"),
                 columns=args.get("columns", []),
                 rows=args.get("rows", []),
+            )
+        if name == "translate_cv_to_pdf":
+            return _tool_translate_cv_to_pdf(
+                employee_name=args.get("employee_name", ""),
+                target_language=args.get("target_language", "en"),
             )
     except Exception:
         logger.exception("Agent: tool %s raised an exception with args %s", name, args)
@@ -1237,6 +1277,31 @@ def _tool_create_csv_report(
         "url": url,
         "filename": f"{safe_title}.csv",
         "row_count": len(rows),
+    }
+
+
+def _tool_translate_cv_to_pdf(employee_name: str, target_language: str) -> dict:
+    """Translate an employee's CV and return a signed PDF download URL."""
+    from agent_cv.services.translation_service import translate_and_export_cv
+    from agent_cv.api.routes import generate_export_url
+
+    result = translate_and_export_cv(employee_name, target_language)
+    if result.get("error"):
+        return {"error": result["error"]}
+
+    export_id = result["export_id"]
+    url = generate_export_url(export_id)
+    logger.info(
+        "Agent: translated CV for %s to %s — export_id=%s",
+        result["employee_name"],
+        target_language,
+        export_id,
+    )
+    return {
+        "url": url,
+        "employee_name": result["employee_name"],
+        "target_language": result["target_language"],
+        "filename": f"{result['employee_name'].replace(' ', '_')}_CV_{target_language.upper()}.pdf",
     }
 
 

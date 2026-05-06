@@ -300,15 +300,23 @@ def download_export_file(
     if not re.fullmatch(r"[0-9a-f\-]{36}", export_id):
         raise HTTPException(status_code=400, detail="Invalid export ID")
 
-    csv_path = f"/tmp/agent_cv_exports/{export_id}.csv"
-    if not os.path.isfile(csv_path):
-        raise HTTPException(status_code=404, detail="Export file not found or has expired")
+    exports_dir = "/tmp/agent_cv_exports"
+    csv_path = f"{exports_dir}/{export_id}.csv"
+    pdf_path = f"{exports_dir}/{export_id}.pdf"
 
-    return FileResponse(
-        path=csv_path,
-        filename=f"{export_id}.csv",
-        media_type="text/csv; charset=utf-8",
-    )
+    if os.path.isfile(csv_path):
+        return FileResponse(
+            path=csv_path,
+            filename=f"{export_id}.csv",
+            media_type="text/csv; charset=utf-8",
+        )
+    if os.path.isfile(pdf_path):
+        return FileResponse(
+            path=pdf_path,
+            filename=f"{export_id}.pdf",
+            media_type="application/pdf",
+        )
+    raise HTTPException(status_code=404, detail="Export file not found or has expired")
 
 
 def _safe_audit(

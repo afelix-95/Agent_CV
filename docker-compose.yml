@@ -38,14 +38,15 @@ services:
     labels:
       - "traefik.enable=true"
       - "traefik.docker.network=${TRAEFIK_NETWORK:-traefik-public}"
-      # Dedicated high-priority routers for each app path — avoids conflict
-      # with other containers registered on the same hostname (e.g. n8n chatbot)
+      # Each app path gets its own high-priority router so Traefik never
+      # falls through to another container (e.g. n8n) registered on the
+      # same hostname via a lower-priority catch-all rule.
       - "traefik.http.routers.agent-cv-webhook.rule=Host(`${APP_DOMAIN}`) && PathPrefix(`/graph-notifications`)"
       - "traefik.http.routers.agent-cv-webhook.entrypoints=websecure"
       - "traefik.http.routers.agent-cv-webhook.tls=true"
       - "traefik.http.routers.agent-cv-webhook.service=agent-cv"
       - "traefik.http.routers.agent-cv-webhook.priority=100"
-      - "traefik.http.routers.agent-cv-api.rule=Host(`${APP_DOMAIN}`) && (PathPrefix(`/admin`) || PathPrefix(`/query`) || PathPrefix(`/teams`) || PathPrefix(`/health`) || PathPrefix(`/employees`) || PathPrefix(`/files`) || PathPrefix(`/exports`) || PathPrefix(`/docs`) || PathPrefix(`/openapi`))"
+      - "traefik.http.routers.agent-cv-api.rule=Host(`${APP_DOMAIN}`) && (PathPrefix(`/admin`) || PathPrefix(`/query`) || PathPrefix(`/teams`) || PathPrefix(`/health`) || PathPrefix(`/files`) || PathPrefix(`/exports`) || PathPrefix(`/docs`) || PathPrefix(`/openapi`))"
       - "traefik.http.routers.agent-cv-api.entrypoints=websecure"
       - "traefik.http.routers.agent-cv-api.tls=true"
       - "traefik.http.routers.agent-cv-api.service=agent-cv"

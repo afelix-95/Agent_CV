@@ -1,0 +1,392 @@
+<!DOCTYPE html>
+<html lang="{{ locale }}">
+<head>
+  <meta charset="UTF-8" />
+  <style>
+    /* ------------------------------------------------------------------ */
+    /* Base reset & page                                                    */
+    /* ------------------------------------------------------------------ */
+    @page {
+      size: A4;
+      margin: 0;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: Arial, Helvetica, sans-serif;
+      font-size: 9pt;
+      color: #333;
+      width: 210mm;
+      min-height: 297mm;
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* Layout: left sidebar + main content                                  */
+    /* ------------------------------------------------------------------ */
+    .page {
+      display: flex;
+      flex-direction: row;
+      width: 210mm;
+      min-height: 297mm;
+    }
+
+    /* ---- Sidebar ---- */
+    .sidebar {
+      width: 62mm;
+      background-color: #003399;
+      color: #fff;
+      padding: 10mm 6mm 10mm 8mm;
+      flex-shrink: 0;
+    }
+    .sidebar .eu-logo {
+      font-size: 7pt;
+      color: #aac4ff;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-bottom: 3mm;
+    }
+    .sidebar .eu-logo span {
+      display: block;
+      font-size: 8pt;
+      font-weight: bold;
+      color: #fff;
+      letter-spacing: 1px;
+    }
+    .sidebar .photo-box {
+      width: 36mm;
+      height: 36mm;
+      background-color: #1a4db3;
+      border: 1px solid #aac4ff;
+      margin: 4mm 0 6mm 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 7pt;
+      color: #aac4ff;
+      text-align: center;
+    }
+    .sidebar .photo-box img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+    }
+
+    /* Sidebar section headings */
+    .sidebar .sb-heading {
+      font-size: 7.5pt;
+      font-weight: bold;
+      color: #aac4ff;
+      text-transform: uppercase;
+      letter-spacing: 0.8px;
+      margin-top: 5mm;
+      margin-bottom: 1.5mm;
+      border-bottom: 0.5pt solid #4d7acc;
+      padding-bottom: 0.5mm;
+    }
+    .sidebar p, .sidebar li {
+      font-size: 8pt;
+      line-height: 1.5;
+      word-break: break-word;
+    }
+    .sidebar ul { list-style: none; padding: 0; }
+    .sidebar ul li::before {
+      content: "▸ ";
+      color: #aac4ff;
+      font-size: 7pt;
+    }
+
+    /* ---- Main content ---- */
+    .main {
+      flex: 1;
+      padding: 10mm 8mm 10mm 8mm;
+      background-color: #fff;
+    }
+
+    /* Name block */
+    .name-block {
+      margin-bottom: 6mm;
+      border-bottom: 2pt solid #003399;
+      padding-bottom: 3mm;
+    }
+    .name-block .full-name {
+      font-size: 18pt;
+      font-weight: bold;
+      color: #003399;
+      letter-spacing: 0.5px;
+    }
+    .name-block .headline {
+      font-size: 10pt;
+      color: #555;
+      margin-top: 1mm;
+    }
+
+    /* Section headings */
+    .section { margin-bottom: 5mm; }
+    .section-title {
+      font-size: 9pt;
+      font-weight: bold;
+      color: #003399;
+      text-transform: uppercase;
+      letter-spacing: 0.8px;
+      background-color: #e8eef8;
+      padding: 1mm 2mm;
+      margin-bottom: 3mm;
+      border-left: 3pt solid #003399;
+    }
+
+    /* Work experience / Education entries */
+    .entry { margin-bottom: 3.5mm; }
+    .entry-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+    }
+    .entry-period {
+      font-size: 8pt;
+      color: #003399;
+      font-weight: bold;
+      white-space: nowrap;
+      min-width: 28mm;
+      padding-right: 3mm;
+      flex-shrink: 0;
+    }
+    .entry-body { flex: 1; }
+    .entry-title {
+      font-size: 9pt;
+      font-weight: bold;
+      color: #222;
+    }
+    .entry-org {
+      font-size: 8.5pt;
+      color: #444;
+      margin-top: 0.3mm;
+    }
+    .entry-activities {
+      font-size: 8pt;
+      color: #555;
+      margin-top: 1mm;
+      line-height: 1.4;
+    }
+
+    /* Language grid */
+    .lang-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 8pt;
+      margin-bottom: 3mm;
+    }
+    .lang-table th {
+      background-color: #003399;
+      color: #fff;
+      font-size: 7.5pt;
+      padding: 1mm 2mm;
+      text-align: center;
+    }
+    .lang-table td {
+      border: 0.5pt solid #ccc;
+      padding: 1mm 2mm;
+      text-align: center;
+    }
+    .lang-table td.lang-name {
+      text-align: left;
+      font-weight: bold;
+    }
+    .cef-level {
+      display: inline-block;
+      background-color: #003399;
+      color: #fff;
+      border-radius: 2px;
+      padding: 0 2px;
+      font-size: 7.5pt;
+    }
+
+    /* Skills paragraph */
+    .skills-text {
+      font-size: 8.5pt;
+      color: #444;
+      line-height: 1.5;
+    }
+
+    /* Europass footer */
+    .footer {
+      margin-top: 6mm;
+      border-top: 0.5pt solid #ccc;
+      padding-top: 2mm;
+      font-size: 7pt;
+      color: #888;
+      text-align: center;
+    }
+  </style>
+</head>
+<body>
+<div class="page">
+
+  <!-- ============================================================ -->
+  <!-- SIDEBAR                                                       -->
+  <!-- ============================================================ -->
+  <div class="sidebar">
+    <div class="eu-logo">
+      europass<span>Curriculum Vitae</span>
+    </div>
+
+    {% if photo_data %}
+    <div class="photo-box">
+      <img src="data:image/jpeg;base64,{{ photo_data }}" alt="Photo" />
+    </div>
+    {% else %}
+    <div class="photo-box">No photo</div>
+    {% endif %}
+
+    <!-- Contact -->
+    <div class="sb-heading">{{ labels.contact }}</div>
+    {% if address %}<p>{{ address }}</p>{% endif %}
+    {% if phone %}<p>☎ {{ phone }}</p>{% endif %}
+    {% if email %}<p>✉ {{ email }}</p>{% endif %}
+    {% if website %}<p>🌐 {{ website }}</p>{% endif %}
+
+    <!-- Personal info -->
+    {% if birthdate or nationality %}
+    <div class="sb-heading">{{ labels.personal }}</div>
+    {% if birthdate %}<p>{{ labels.dob }}: {{ birthdate }}</p>{% endif %}
+    {% if nationality %}<p>{{ labels.nationality }}: {{ nationality }}</p>{% endif %}
+    {% endif %}
+
+    <!-- Mother tongue -->
+    {% if mother_tongue %}
+    <div class="sb-heading">{{ labels.mother_tongue }}</div>
+    <p>{{ mother_tongue }}</p>
+    {% endif %}
+
+    <!-- Driving licence -->
+    {% if driving_licences %}
+    <div class="sb-heading">{{ labels.driving }}</div>
+    <ul>
+      {% for lic in driving_licences %}<li>{{ lic }}</li>{% endfor %}
+    </ul>
+    {% endif %}
+  </div>
+
+  <!-- ============================================================ -->
+  <!-- MAIN CONTENT                                                  -->
+  <!-- ============================================================ -->
+  <div class="main">
+
+    <!-- Name & headline -->
+    <div class="name-block">
+      <div class="full-name">{{ first_name }} {{ surname }}</div>
+      {% if headline %}<div class="headline">{{ headline }}</div>{% endif %}
+    </div>
+
+    <!-- Work Experience -->
+    {% if work_experience %}
+    <div class="section">
+      <div class="section-title">{{ labels.work_experience }}</div>
+      {% for w in work_experience %}
+      <div class="entry">
+        <div class="entry-header">
+          <div class="entry-period">
+            {{ w.from_date }}{% if not w.is_current %} – {{ w.to_date }}{% else %} – {{ labels.present }}{% endif %}
+          </div>
+          <div class="entry-body">
+            {% if w.position %}<div class="entry-title">{{ w.position }}</div>{% endif %}
+            <div class="entry-org">
+              {{ w.employer_name }}{% if w.employer_city %}, {{ w.employer_city }}{% endif %}{% if w.employer_country %} ({{ w.employer_country }}){% endif %}
+            </div>
+            {% if w.activities %}
+            <div class="entry-activities">{{ w.activities }}</div>
+            {% endif %}
+          </div>
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+    {% endif %}
+
+    <!-- Education -->
+    {% if education %}
+    <div class="section">
+      <div class="section-title">{{ labels.education }}</div>
+      {% for e in education %}
+      <div class="entry">
+        <div class="entry-header">
+          <div class="entry-period">
+            {{ e.from_date }}{% if not e.is_current %} – {{ e.to_date }}{% else %} – {{ labels.present }}{% endif %}
+          </div>
+          <div class="entry-body">
+            {% if e.title %}<div class="entry-title">{{ e.title }}</div>{% endif %}
+            <div class="entry-org">
+              {{ e.org_name }}{% if e.org_city %}, {{ e.org_city }}{% endif %}{% if e.org_country %} ({{ e.org_country }}){% endif %}
+            </div>
+            {% if e.activities %}
+            <div class="entry-activities">{{ e.activities }}</div>
+            {% endif %}
+          </div>
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+    {% endif %}
+
+    <!-- Language skills -->
+    {% if foreign_languages %}
+    <div class="section">
+      <div class="section-title">{{ labels.language_skills }}</div>
+      <table class="lang-table">
+        <thead>
+          <tr>
+            <th style="text-align:left">{{ labels.language }}</th>
+            <th>{{ labels.listening }}</th>
+            <th>{{ labels.reading }}</th>
+            <th>{{ labels.spoken_interaction }}</th>
+            <th>{{ labels.spoken_production }}</th>
+            <th>{{ labels.writing }}</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for lang in foreign_languages %}
+          <tr>
+            <td class="lang-name">{{ lang.label }}</td>
+            <td><span class="cef-level">{{ lang.listening or '–' }}</span></td>
+            <td><span class="cef-level">{{ lang.reading or '–' }}</span></td>
+            <td><span class="cef-level">{{ lang.spoken_interaction or '–' }}</span></td>
+            <td><span class="cef-level">{{ lang.spoken_production or '–' }}</span></td>
+            <td><span class="cef-level">{{ lang.writing or '–' }}</span></td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      <p style="font-size:7pt;color:#888;">{{ labels.cef_note }}</p>
+    </div>
+    {% endif %}
+
+    <!-- Communication skills -->
+    {% if communication_skills %}
+    <div class="section">
+      <div class="section-title">{{ labels.communication_skills }}</div>
+      <p class="skills-text">{{ communication_skills }}</p>
+    </div>
+    {% endif %}
+
+    <!-- Computer skills -->
+    {% if computer_skills %}
+    <div class="section">
+      <div class="section-title">{{ labels.computer_skills }}</div>
+      <p class="skills-text">{{ computer_skills }}</p>
+    </div>
+    {% endif %}
+
+    <!-- Other skills -->
+    {% if other_skills %}
+    <div class="section">
+      <div class="section-title">{{ labels.other_skills }}</div>
+      <p class="skills-text">{{ other_skills }}</p>
+    </div>
+    {% endif %}
+
+    <div class="footer">
+      Europass CV — {{ labels.generated_with }}
+    </div>
+
+  </div><!-- /main -->
+</div><!-- /page -->
+</body>
+</html>
