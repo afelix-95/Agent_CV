@@ -262,9 +262,10 @@ def _ingest_one_file(
 
 
 def _delete_existing_document(cur, file_path: Path) -> bool:
+    digest = _hash_file(file_path)
     cur.execute(
-        "select document_id from source_documents where source_path = %s or original_filename = %s",
-        (str(file_path), file_path.name),
+        "select document_id from source_documents where source_path = %s or original_filename = %s or sha256_hash = %s",
+        (str(file_path), file_path.name, digest),
     )
     rows = cur.fetchall()
     if not rows:

@@ -74,6 +74,18 @@ curl -s -X POST http://localhost:8000/admin/ingest \
   -d '{"max_files": 200}'
 ```
 
+   To force-reingest a specific file (e.g. after renaming it):
+
+**bash**
+```bash
+curl -k -s -X POST https://production.server.address/admin/ingest \
+  -H "Content-Type: application/json" \
+  -d '{"max_files": 1, "force_reingest": true, "filename_contains": "part-of-filename"}'
+```
+
+   > **Note:** When calling the production server, use `https://` and add `-k` to skip
+   > internal CA certificate verification. Plain `http://` will return a permanent redirect (301) to HTTPS.
+
 7. Query:
 
 **pwsh**
