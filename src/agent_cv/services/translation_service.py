@@ -637,14 +637,12 @@ def _xml_to_template_context(xml_str: str, cv_data: dict, target_language: str) 
                 "from_date": (from_el.get("value") if from_el is not None else None) or _text(from_el),
                 "to_date": (to_el.get("value") if to_el is not None else None) or _text(to_el),
                 "is_current": _text(curr_el).lower() == "true",
-                "position": _ltext("") or _text(we.find("ep:Position/ep:Label", ns)),
+                "position": _text(we.find("ep:Position/ep:Label", ns)),
                 "activities": _text(we.find("ep:Activities", ns)),
                 "employer_name": _text(we.find("ep:Employer/ep:Name", ns)),
                 "employer_city": _text(we.find("ep:Employer/ep:ContactInfo/ep:Address/ep:Contact/ep:Municipality", ns)),
                 "employer_country": _text(we.find("ep:Employer/ep:ContactInfo/ep:Address/ep:Contact/ep:Country/ep:Label", ns)),
             })
-            # Fix position — we.find needs direct lookup, patch it
-            ctx["work_experience"][-1]["position"] = _text(we.find("ep:Position/ep:Label", ns))
 
         # Education
         for ed in learner.findall("ep:EducationList/ep:Education", ns):
