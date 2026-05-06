@@ -18,6 +18,19 @@ LABEL org.opencontainers.image.version=$APP_VERSION \
 
 WORKDIR /app
 
+# System libraries required by WeasyPrint (Pango, GObject, Cairo, etc.)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libgobject-2.0-0 \
+        libpango-1.0-0 \
+        libpangoft2-1.0-0 \
+        libpangocairo-1.0-0 \
+        libcairo2 \
+        libgdk-pixbuf-2.0-0 \
+        libffi8 \
+        shared-mime-info \
+        fonts-liberation \
+    && rm -rf /var/lib/apt/lists/*
+
 # Copy installed packages (deps + agent_cv package + metadata) from builder stage
 COPY --from=builder /install /usr/local
 
