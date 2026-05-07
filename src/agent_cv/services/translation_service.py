@@ -96,16 +96,7 @@ def _fpdf2_context_to_pdf(ctx: dict) -> bytes:
     pdf.set_text_color(*WHITE)
     pdf.cell(SB_TEXT_W, 4, "Curriculum Vitae")
 
-    # Photo placeholder
-    pdf.set_fill_color(26, 77, 179)
-    pdf.set_draw_color(*LIGHT_BLUE)
-    pdf.rect(SB_PAD_L, 20, 36, 36, style="FD")
-    pdf.set_font("DejaVu", "", 6.5)
-    pdf.set_text_color(*LIGHT_BLUE)
-    pdf.set_xy(SB_PAD_L, 35)
-    pdf.cell(36, 4, "Photo", align="C")
-
-    sb_y = 62.0
+    sb_y = 22.0
 
     # Name
     full_name = f"{ctx.get('first_name', '')} {ctx.get('surname', '')}".strip()
@@ -189,8 +180,8 @@ def _fpdf2_context_to_pdf(ctx: dict) -> bytes:
         pdf.set_fill_color(*BLUE)
         pdf.set_text_color(*WHITE)
         pdf.set_font("DejaVu", "B", 8.5)
-        pdf.cell(CONTENT_W, 6, f"  {title}", fill=True)
-        cy = pdf.get_y() + 2
+        pdf.cell(CONTENT_W, 6, f"  {title}", fill=True, ln=True)
+        cy += 8
 
     def _timeline_entry(entry: dict, date_w: float = 26) -> None:
         nonlocal cy
@@ -275,7 +266,7 @@ def _fpdf2_context_to_pdf(ctx: dict) -> bytes:
         pdf.set_font("DejaVu", "B", 7)
         for lbl in col_labels:
             pdf.cell(col_w, 5, lbl, border="B", fill=True)
-        cy = pdf.get_y() + 1
+        cy += 6
 
         for lang in ctx["foreign_languages"]:
             _check_page_break(6)
@@ -292,7 +283,7 @@ def _fpdf2_context_to_pdf(ctx: dict) -> bytes:
             ]
             for val in row_vals:
                 pdf.cell(col_w, 5, val)
-            cy = pdf.get_y() + 1
+            cy += 6
 
         if labels.get("cef_note"):
             _check_page_break(8)
@@ -312,7 +303,6 @@ def _fpdf2_context_to_pdf(ctx: dict) -> bytes:
         if text:
             cy += 2
             _section_header(labels.get(label_key, label_key))
-            _check_page_break(10)
             pdf.set_xy(CONTENT_X, cy)
             pdf.set_font("DejaVu", "", 8)
             pdf.set_text_color(*DARK)

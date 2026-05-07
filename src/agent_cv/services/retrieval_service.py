@@ -10,7 +10,7 @@ from openai import AzureOpenAI
 from agent_cv.config import settings
 from agent_cv.db.connection import get_connection
 
-MAX_CONTEXT_SNIPPETS = 8
+MAX_CONTEXT_SNIPPETS = 20
 MAX_CONTEXT_TEXT_CHARS = 1800
 
 

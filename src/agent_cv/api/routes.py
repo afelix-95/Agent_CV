@@ -397,6 +397,13 @@ def download_export_file(
             filename=f"{export_id}.pdf",
             media_type="application/pdf",
         )
+    zip_path = f"{exports_dir}/{export_id}.zip"
+    if os.path.isfile(zip_path):
+        return FileResponse(
+            path=zip_path,
+            filename=f"certificates_{export_id}.zip",
+            media_type="application/zip",
+        )
     raise HTTPException(status_code=404, detail="Export file not found or has expired")
 
 

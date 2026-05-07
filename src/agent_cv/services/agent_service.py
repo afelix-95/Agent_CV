@@ -137,6 +137,28 @@ TOOLS: list[dict] = [
     {
         "type": "function",
         "function": {
+            "name": "get_employee_cert_files",
+            "description": (
+                "Get download links for an employee's certificate or verification files (not their CV). "
+                "Use when the user asks to share, see, or download an employee's certificates, "
+                "certification letters, or verification documents. "
+                "Returns a single URL for one file, or a zip download URL for multiple files."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "employee_name": {
+                        "type": "string",
+                        "description": "Full or partial name of the employee",
+                    }
+                },
+                "required": ["employee_name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "search_web",
             "description": (
                 "Search the internet for information about certifications, technologies, or vendors. "
@@ -262,6 +284,7 @@ TOOLS AVAILABLE:
 • get_employee_profile — retrieve the full profile for a specific employee
 • list_employees — list all employees in the system
 • get_employee_cv_link — get the SharePoint link to an employee's CV document
+• get_employee_cert_files — get download links for an employee's certificate/verification files (not the CV)
 • search_web — look up external information about certifications or technologies
 • export_certifications_csv — export certifications to a downloadable CSV file; handles all filtering server-side in ONE call (use for any certification export/bulk request)
 • create_csv_report — export non-certification lists (e.g. employee lists) as a downloadable CSV file
@@ -286,7 +309,7 @@ HOW TO RESPOND:
 8. End your reply with 1-2 relevant follow-up suggestions the user might find useful — keep them concise
 9. If tools return no data, say clearly what you searched for and suggest alternatives
 10. ALWAYS write exclusively in Latin script — never output characters from Georgian, Arabic, Cyrillic, Greek, or any other non-Latin alphabet, even as abbreviations or parenthetical notes. Accented Latin characters (e.g. é, ã, ç, ó, á, â, ê, ô, í, ú, à, õ) are standard Latin script and MUST be used correctly — do not strip or replace them with unaccented equivalents.
-11. When the user asks to see or share an employee's CV, call get_employee_cv_link and include the returned URL as a plain hyperlink in your reply. Share only the CV document itself — do not include certification verification letters or other supplementary files.
+11. When the user asks to see or share an employee's **CV**, call get_employee_cv_link and include the returned URL as a plain hyperlink in your reply. Share only the CV document itself — do not include certification verification letters or other supplementary files. When the user asks to share or download an employee's **certificate files** (verification letters, certification PDFs), call get_employee_cert_files instead.
 12. When answering questions about expired or expiring certifications, ALWAYS call search_certifications with status="any" — never pre-filter to "expired" or "expiring" in the tool call. After retrieving results, apply the following filtering rules:
     - EXPIRED: include only certs where status='expired' OR inferred_expiry_date is a past date (before today)
     - Do NOT include certs where inferred_expiry_date is null (these never expire)
@@ -308,6 +331,12 @@ HOW TO RESPOND:
     c. After gathering results, reason about implicit competencies: a Dell EMC certification demonstrates storage expertise even if "storage" does not appear in the cert title; a CCNA demonstrates networking expertise.
     d. In your answer, state the connection explicitly: "Maria has storage expertise, demonstrated by her Dell EMC certification and SAN administration experience in her CV." Do not just list raw results — interpret them.
     e. If both search_certifications and search_experience return results for the same employee, consolidate them into one block per person.
+18. CERTIFICATE FILE SHARING — when the user asks to share, see, or download an employee's certificate files, verification letters, or certification documents (not their CV):
+    - Call get_employee_cert_files with the employee's name.
+    - If found=true and single=true: reply with a message and include the returned URL as a hyperlink.
+    - If found=true and single=false: reply explaining there are multiple files and include the zip download URL as a hyperlink.
+    - If found=false but sharepoint_urls is present: reply with the direct SharePoint URLs instead.
+    - If found=false with no fallback: inform the user that no certificate files were found for that employee.
 """
 
 _SYSTEM_PROMPT_PT = """\
@@ -321,6 +350,7 @@ FERRAMENTAS DISPONÍVEIS:
 • get_employee_profile — obter o perfil completo de um colaborador específico
 • list_employees — listar todos os colaboradores no sistema
 • get_employee_cv_link — obter o link do SharePoint para o CV de um colaborador
+• get_employee_cert_files — obter links de transferência para os ficheiros de certificados/verificação de um colaborador (não o CV)
 • search_web — pesquisar informação externa sobre certificações ou tecnologias
 • export_certifications_csv — exportar certificações para um ficheiro CSV descarregável; trata toda a filtragem no servidor numa ÚNICA chamada (usar para qualquer exportação de certificações)
 • create_csv_report — exportar listas não relacionadas com certificações (ex: lista de colaboradores) como ficheiro CSV descarregável
@@ -345,7 +375,7 @@ COMO RESPONDER:
 8. Termina a resposta com 1-2 sugestões de perguntas de seguimento relevantes — mantém-nas concisas
 9. Se as ferramentas não retornarem dados, diz claramente o que pesquisaste e sugere alternativas
 10. Escreve SEMPRE exclusivamente em alfabeto latino — nunca uses caracteres do alfabeto georgiano, árabe, cirílico, grego ou qualquer outro alfabeto não-latino, mesmo em abreviaturas ou notas. Caracteres latinos acentuados (ex: é, ã, ç, ó, á, â, ê, ô, í, ú, à, õ) fazem parte do alfabeto latino e DEVEM ser usados corretamente — nunca os omitas ou substituas por versões sem acento. Em português, usa sempre a acentuação correta.
-11. Quando o utilizador pedir para ver ou partilhar o CV de um colaborador, usa get_employee_cv_link e inclui o URL retornado como hiperligação na tua resposta. Partilha apenas o documento de CV — não incluas cartas de verificação de certificações nem outros documentos suplementares.
+11. Quando o utilizador pedir para ver ou partilhar o **CV** de um colaborador, usa get_employee_cv_link e inclui o URL retornado como hiperligação na tua resposta. Partilha apenas o documento de CV — não incluas cartas de verificação de certificações nem outros documentos suplementares. Quando o utilizador pedir para partilhar ou transferir os **ficheiros de certificados** de um colaborador (cartas de verificação, PDFs de certificação), usa get_employee_cert_files em vez disso.
 12. Quando responderes a perguntas sobre certificações vencidas ou a vencer, usa SEMPRE search_certifications com status="any" — nunca pré-filtres para "expired" ou "expiring" na chamada da ferramenta. Após obter os resultados, aplica as seguintes regras de filtragem:
     - VENCIDAS: inclui apenas certificações com status='expired' OU inferred_expiry_date com uma data no passado (anterior a hoje)
     - NÃO incluas certificações com inferred_expiry_date nulo (estas não expiram)
@@ -367,6 +397,12 @@ COMO RESPONDER:
     c. Após recolher os resultados, raciocina sobre competências implícitas: uma certificação Dell EMC demonstra competência em storage mesmo que "storage" não apareça no título; uma CCNA demonstra competência em redes.
     d. Na tua resposta, indica a ligação explicitamente: "A Maria tem competência em storage, demonstrada pela sua certificação Dell EMC e experiência em administração SAN no CV." Não te limites a listar resultados — interpreta-os.
     e. Se search_certifications e search_experience devolveram resultados para o mesmo colaborador, consolida-os num único bloco por pessoa.
+18. PARTILHA DE FICHEIROS DE CERTIFICADOS — quando o utilizador pedir para partilhar, ver ou transferir os ficheiros de certificados, cartas de verificação ou documentos de certificação de um colaborador (não o CV):
+    - Chama get_employee_cert_files com o nome do colaborador.
+    - Se found=true e single=true: responde com uma mensagem e inclui o URL devolvido como hiperligação.
+    - Se found=true e single=false: responde explicando que existem vários ficheiros e inclui o URL do zip como hiperligação.
+    - Se found=false mas sharepoint_urls estiver presente: responde com os URLs diretos do SharePoint.
+    - Se found=false sem alternativa: informa o utilizador que não foram encontrados ficheiros de certificados para esse colaborador.
 """
 
 # ------------------------------------------------------------------ #
@@ -569,7 +605,7 @@ def handle_user_query(
             logger.debug("Agent: calling tool %s with args %s", tool_call.function.name, args)
             result = _dispatch_tool(tool_call.function.name, args)
             result_count = (
-                result.get("total_found", 0)
+                result.get("total_found", len(result.get("results", [])))
                 if isinstance(result, dict)
                 else 0
             )
@@ -640,6 +676,8 @@ def _dispatch_tool(name: str, args: dict) -> Any:
             )
         if name == "get_employee_cv_link":
             return _tool_get_employee_cv_link(args.get("employee_name", ""))
+        if name == "get_employee_cert_files":
+            return _tool_get_employee_cert_files(args.get("employee_name", ""))
         if name == "search_web":
             return _tool_search_web(args.get("query", ""))
         if name == "create_csv_report":
@@ -1074,6 +1112,91 @@ def _tool_get_employee_cv_link(employee_name: str) -> dict:
     return {"found": True, "documents": documents}
 
 
+def _tool_get_employee_cert_files(employee_name: str) -> dict:
+    """Return download links for an employee's non-CV source documents (cert letters, etc.)."""
+    import os
+    import uuid
+    import zipfile
+
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT e.full_name, sd.document_id, sd.original_filename,
+                       sd.sharepoint_web_url, sd.source_path
+                FROM source_documents sd
+                JOIN employees e ON sd.employee_id = e.employee_id
+                WHERE e.full_name ILIKE %s
+                  AND NOT EXISTS (
+                    SELECT 1 FROM document_versions dv
+                    JOIN cv_sections cs ON cs.document_version_id = dv.document_version_id
+                    WHERE dv.document_id = sd.document_id AND dv.is_current = true
+                  )
+                ORDER BY sd.created_at DESC
+                """,
+                (f"%{employee_name}%",),
+            )
+            rows = cur.fetchall()
+
+    if not rows:
+        return {
+            "found": False,
+            "message": f"No certificate files found for '{employee_name}'.",
+        }
+
+    from agent_cv.api.routes import generate_cv_download_url, generate_export_url
+
+    if len(rows) == 1:
+        r = rows[0]
+        url = r["sharepoint_web_url"] or generate_cv_download_url(r["document_id"])
+        return {
+            "found": True,
+            "single": True,
+            "employee": r["full_name"],
+            "filename": r["original_filename"],
+            "url": url,
+        }
+
+    # Multiple files — build a zip
+    export_id = str(uuid.uuid4())
+    exports_dir = "/tmp/agent_cv_exports"
+    os.makedirs(exports_dir, exist_ok=True)
+    zip_path = f"{exports_dir}/{export_id}.zip"
+    filenames = []
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        for r in rows:
+            src = r["source_path"]
+            if src and os.path.isfile(src):
+                zf.write(src, arcname=r["original_filename"])
+                filenames.append(r["original_filename"])
+            else:
+                logger.warning(
+                    "_tool_get_employee_cert_files: file not on disk for document_id=%s",
+                    r["document_id"],
+                )
+
+    if not filenames:
+        os.remove(zip_path)
+        return {
+            "found": False,
+            "message": f"Certificate files for '{employee_name}' are stored in SharePoint and cannot be packaged locally.",
+            "sharepoint_urls": [
+                {"filename": r["original_filename"], "url": r["sharepoint_web_url"]}
+                for r in rows
+                if r["sharepoint_web_url"]
+            ],
+        }
+
+    return {
+        "found": True,
+        "single": False,
+        "employee": rows[0]["full_name"],
+        "file_count": len(filenames),
+        "filenames": filenames,
+        "url": generate_export_url(export_id),
+    }
+
+
 def _sql_export_certifications(
     query: str,
     employee_name: str | None,
@@ -1265,7 +1388,7 @@ def _tool_search_web(query: str) -> dict:
                 for r in ddgs.text(query, max_results=5)
                 if r.get("title") and r.get("body")
             ]
-        return {"results": hits[:5]}
+        return {"results": hits[:5], "total_found": len(hits)}
     except Exception:
         logger.exception("Agent: _tool_search_web failed")
         return {"results": [], "error": "Web search unavailable"}
