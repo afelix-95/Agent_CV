@@ -1,5 +1,5 @@
 # ── Stage 1: dependencies ──────────────────────────────────────────────────────
-FROM python:3.12-slim AS builder
+FROM python:3.12-slim-bookworm AS builder
 
 WORKDIR /build
 
@@ -10,7 +10,7 @@ RUN pip install --no-cache-dir --prefix=/install -r requirements.txt && \
     pip install --no-cache-dir --no-deps --prefix=/install .
 
 # ── Stage 2: runtime ───────────────────────────────────────────────────────────
-FROM python:3.12-slim
+FROM python:3.12-slim-bookworm
 
 ARG APP_VERSION=dev
 LABEL org.opencontainers.image.version=$APP_VERSION \
@@ -19,8 +19,7 @@ LABEL org.opencontainers.image.version=$APP_VERSION \
 WORKDIR /app
 
 # System libraries required by WeasyPrint (Pango, GObject, Cairo, etc.)
-# --fix-missing retries with a mirror fallback on transient hash-mismatch errors.
-RUN apt-get update && apt-get install -y --no-install-recommends --fix-missing \
+RUN apt-get update && apt-get install -y --no-install-recommends \
         libgobject-2.0-0 \
         libpango-1.0-0 \
         libpangoft2-1.0-0 \
