@@ -3,6 +3,9 @@ FROM python:3.12-slim-bookworm AS builder
 
 WORKDIR /build
 
+# Allow pip to connect through the corporate SSL-intercepting proxy
+ENV PIP_TRUSTED_HOST="pypi.org files.pythonhosted.org pypi.python.org"
+
 COPY requirements.txt pyproject.toml ./
 COPY src/ ./src/
 
