@@ -31,6 +31,9 @@ TOOLS: list[dict] = [
                 "Search the employee certifications database by technology, vendor, or keyword. "
                 "Returns employees with matching certifications including name, vendor, status, and dates. "
                 "Use this whenever the user asks who has certifications in a specific area. "
+                "Broad competency keywords (e.g. 'storage', 'security', 'networking', 'cloud', 'virtualization') "
+                "are automatically expanded server-side to include related vendors and technologies — "
+                "a single call with the competency keyword is sufficient for certifications. "
                 "Supports pagination: use 'offset' to fetch the next page of results (page size is 15)."
             ),
             "parameters": {
@@ -300,15 +303,11 @@ HOW TO RESPOND:
     - Infer the language code from the user's request (e.g. "French" → "fr", "Portuguese" → "pt", "Spanish" → "es").
     - Reply with a brief message and include the returned download URL as a hyperlink.
 17. COMPETENCY ANALYSIS — when a user asks who has experience, skills, or certifications in a broad competency area (e.g. "storage", "networking", "security", "cloud", "virtualization"):
-    a. Before searching, think about which vendors, certification names, and sub-technologies are commonly associated with that competency. For example:
-       - "storage" → Dell EMC, NetApp, Pure Storage, Veeam, SAN, NAS, vSAN, S3, object storage, backup
-       - "cloud" → AWS, Azure, GCP, Azure Fundamentals, AZ-104, AZ-900, AWS SAA, Google Cloud
-       - "networking" → Cisco, CCNA, CCNP, Juniper, SDN, routing, switching, Fortinet, Palo Alto
-       - "security" → CompTIA Security+, CISSP, SC-200, CEH, Palo Alto, Fortinet, SOC, SIEM, pentest
-       - "virtualization" → VMware, vSphere, VCP, Hyper-V, KVM, Nutanix
-    b. Run multiple search_certifications AND search_experience calls using those related terms — do not rely solely on the exact word the user typed.
+    a. Call search_certifications ONCE with the competency keyword — the tool automatically expands it server-side to all related vendors and technologies. No need to issue separate calls for each vendor.
+    b. ALSO call search_experience with the same keyword to find employees who have CV evidence (work experience, projects) even without formal certifications.
     c. After gathering results, reason about implicit competencies: a Dell EMC certification demonstrates storage expertise even if "storage" does not appear in the cert title; a CCNA demonstrates networking expertise.
     d. In your answer, state the connection explicitly: "Maria has storage expertise, demonstrated by her Dell EMC certification and SAN administration experience in her CV." Do not just list raw results — interpret them.
+    e. If both search_certifications and search_experience return results for the same employee, consolidate them into one block per person.
 """
 
 _SYSTEM_PROMPT_PT = """\
@@ -363,16 +362,12 @@ COMO RESPONDER:
     - Infere o código do idioma a partir do pedido do utilizador (ex: "francês" → "fr", "inglês" → "en", "espanhol" → "es").
     - Responde com uma mensagem breve e inclui o URL de transferência devolvido como hiperligação.
 17. ANÁLISE DE COMPETÊNCIAS — quando o utilizador perguntar quem tem experiência, competências ou certificações numa área ampla (ex: "storage", "redes", "segurança", "cloud", "virtualização"):
-    a. Antes de pesquisar, pensa em que fornecedores, nomes de certificações e sub-tecnologias estão normalmente associados a essa competência. Por exemplo:
-       - "storage" → Dell EMC, NetApp, Pure Storage, Veeam, SAN, NAS, vSAN, S3, object storage, backup
-       - "cloud" → AWS, Azure, GCP, Azure Fundamentals, AZ-104, AZ-900, AWS SAA, Google Cloud
-       - "redes" → Cisco, CCNA, CCNP, Juniper, SDN, routing, switching, Fortinet, Palo Alto
-       - "segurança" → CompTIA Security+, CISSP, SC-200, CEH, Palo Alto, Fortinet, SOC, SIEM, pentest
-       - "virtualização" → VMware, vSphere, VCP, Hyper-V, KVM, Nutanix
-    b. Executa várias chamadas a search_certifications E search_experience com esses termos relacionados — não te limites à palavra exata usada pelo utilizador.
+    a. Chama search_certifications UMA VEZ com a palavra-chave da competência — a ferramenta expande automaticamente no servidor para todos os fornecedores e tecnologias relacionados. Não é necessário fazer chamadas separadas por fornecedor.
+    b. Chama TAMBÉM search_experience com a mesma palavra-chave para encontrar colaboradores com evidência no CV (experiência profissional, projetos) mesmo sem certificações formais.
     c. Após recolher os resultados, raciocina sobre competências implícitas: uma certificação Dell EMC demonstra competência em storage mesmo que "storage" não apareça no título; uma CCNA demonstra competência em redes.
-    d. Na tua resposta, indica a ligação explicitamente: "A Maria tem competência em storage, demonstrada pela sua certificação Dell EMC e experiência em administração SAN no CV." Não te limites a listar resultados — interpreta-os."""
-
+    d. Na tua resposta, indica a ligação explicitamente: "A Maria tem competência em storage, demonstrada pela sua certificação Dell EMC e experiência em administração SAN no CV." Não te limites a listar resultados — interpreta-os.
+    e. Se search_certifications e search_experience devolveram resultados para o mesmo colaborador, consolida-os num único bloco por pessoa.
+"""
 
 # ------------------------------------------------------------------ #
 # Public types                                                         #
@@ -777,6 +772,24 @@ def _infer_expiry_date(cert_name: str, vendor: str, issue_date: object) -> objec
 
 _PAGE_SIZE = 15
 
+# Maps a broad competency keyword (normalize_text form: no accents, lowercase)
+# to the set of vendor/technology tokens that should be added to the SQL search.
+# This runs server-side so even a single-keyword LLM call returns full results.
+_COMPETENCY_EXPANSIONS: dict[str, list[str]] = {
+    "storage":        ["dell", "emc", "netapp", "veeam", "san", "nas", "vsan", "backup", "pure"],
+    "cloud":          ["azure", "aws", "amazon", "gcp", "google"],
+    "networking":     ["cisco", "ccna", "ccnp", "juniper", "fortinet", "routing", "switching"],
+    "network":        ["cisco", "ccna", "ccnp", "juniper", "fortinet"],
+    "redes":          ["cisco", "ccna", "ccnp", "juniper", "fortinet", "routing", "switching"],
+    "security":       ["cissp", "comptia", "palo", "fortinet", "soc", "siem", "pentest", "ceh", "cism", "cisa"],
+    "seguranca":      ["cissp", "comptia", "palo", "fortinet", "soc", "siem", "pentest", "ceh", "cism", "cisa"],
+    "virtualization": ["vmware", "vsphere", "vcp", "nutanix", "kvm", "hyper"],
+    "virtualizacao":  ["vmware", "vsphere", "vcp", "nutanix", "kvm", "hyper"],
+    "backup":         ["veeam", "dell", "emc", "netbackup", "commvault", "arcserve"],
+    "database":       ["oracle", "mssql", "mysql", "postgresql", "mongodb", "dba"],
+    "base de dados":  ["oracle", "mssql", "mysql", "postgresql", "mongodb", "dba"],
+}
+
 
 def _tool_search_certifications(
     query: str,
@@ -844,6 +857,13 @@ def _sql_search_certifications(
     raw_tokens = [t for t in norm.split() if len(t) >= 3][:6]
     # Only use tokens that are likely cert/vendor/tech names, not generic words
     tokens = [t for t in raw_tokens if t not in _GENERIC_TOKENS]
+
+    # Expand any broad competency keywords into related vendor/tech tokens.
+    # This ensures e.g. 'storage' also matches Dell EMC, Veeam, NetApp, etc.
+    _expanded: list[str] = list(tokens)
+    for _t in tokens:
+        _expanded.extend(_COMPETENCY_EXPANSIONS.get(_t, []))
+    tokens = list(dict.fromkeys(_expanded))  # deduplicate, preserve order
 
     where_parts: list[str] = []
     params: list[Any] = []
@@ -1236,29 +1256,19 @@ def _tool_export_certifications_csv(
 
 
 def _tool_search_web(query: str) -> dict:
-    _url = "https://api.duckduckgo.com/"
-    params = {"q": query, "format": "json", "no_redirect": 1, "skip_disambig": 1}
     try:
-        with httpx.Client(timeout=6.0) as http:
-            response = http.get(_url, params=params)
-            response.raise_for_status()
-            body = response.json()
-    except Exception:
-        return {"results": [], "error": "Web search unavailable"}
+        from duckduckgo_search import DDGS  # type: ignore
 
-    hits: list[str] = []
-    abstract = (body.get("AbstractText") or "").strip()
-    heading = (body.get("Heading") or "").strip()
-    if abstract:
-        hits.append(f"{heading}: {abstract}" if heading else abstract)
-    for item in body.get("RelatedTopics") or []:
-        if isinstance(item, dict):
-            text = (item.get("Text") or "").strip()
-            if text:
-                hits.append(text)
-        if len(hits) >= 5:
-            break
-    return {"results": hits[:5]}
+        with DDGS(timeout=8) as ddgs:
+            hits = [
+                f"{r['title']}: {r['body']}"
+                for r in ddgs.text(query, max_results=5)
+                if r.get("title") and r.get("body")
+            ]
+        return {"results": hits[:5]}
+    except Exception:
+        logger.exception("Agent: _tool_search_web failed")
+        return {"results": [], "error": "Web search unavailable"}
 
 
 def _tool_create_csv_report(
