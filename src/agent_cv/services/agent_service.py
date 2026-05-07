@@ -16,7 +16,7 @@ from agent_cv.services.query_service import QueryAnalysis, normalize_text
 
 logger = logging.getLogger(__name__)
 
-MAX_AGENT_ITERATIONS = 12
+MAX_AGENT_ITERATIONS = 15
 
 # ------------------------------------------------------------------ #
 # Tool schema                                                          #
@@ -299,6 +299,16 @@ HOW TO RESPOND:
     - Call translate_cv_to_pdf with the employee's name and the target language ISO 639-1 code.
     - Infer the language code from the user's request (e.g. "French" → "fr", "Portuguese" → "pt", "Spanish" → "es").
     - Reply with a brief message and include the returned download URL as a hyperlink.
+17. COMPETENCY ANALYSIS — when a user asks who has experience, skills, or certifications in a broad competency area (e.g. "storage", "networking", "security", "cloud", "virtualization"):
+    a. Before searching, think about which vendors, certification names, and sub-technologies are commonly associated with that competency. For example:
+       - "storage" → Dell EMC, NetApp, Pure Storage, Veeam, SAN, NAS, vSAN, S3, object storage, backup
+       - "cloud" → AWS, Azure, GCP, Azure Fundamentals, AZ-104, AZ-900, AWS SAA, Google Cloud
+       - "networking" → Cisco, CCNA, CCNP, Juniper, SDN, routing, switching, Fortinet, Palo Alto
+       - "security" → CompTIA Security+, CISSP, SC-200, CEH, Palo Alto, Fortinet, SOC, SIEM, pentest
+       - "virtualization" → VMware, vSphere, VCP, Hyper-V, KVM, Nutanix
+    b. Run multiple search_certifications AND search_experience calls using those related terms — do not rely solely on the exact word the user typed.
+    c. After gathering results, reason about implicit competencies: a Dell EMC certification demonstrates storage expertise even if "storage" does not appear in the cert title; a CCNA demonstrates networking expertise.
+    d. In your answer, state the connection explicitly: "Maria has storage expertise, demonstrated by her Dell EMC certification and SAN administration experience in her CV." Do not just list raw results — interpret them.
 """
 
 _SYSTEM_PROMPT_PT = """\
@@ -352,7 +362,16 @@ COMO RESPONDER:
     - Chama translate_cv_to_pdf com o nome do colaborador e o código ISO 639-1 do idioma de destino.
     - Infere o código do idioma a partir do pedido do utilizador (ex: "francês" → "fr", "inglês" → "en", "espanhol" → "es").
     - Responde com uma mensagem breve e inclui o URL de transferência devolvido como hiperligação.
-"""
+17. ANÁLISE DE COMPETÊNCIAS — quando o utilizador perguntar quem tem experiência, competências ou certificações numa área ampla (ex: "storage", "redes", "segurança", "cloud", "virtualização"):
+    a. Antes de pesquisar, pensa em que fornecedores, nomes de certificações e sub-tecnologias estão normalmente associados a essa competência. Por exemplo:
+       - "storage" → Dell EMC, NetApp, Pure Storage, Veeam, SAN, NAS, vSAN, S3, object storage, backup
+       - "cloud" → AWS, Azure, GCP, Azure Fundamentals, AZ-104, AZ-900, AWS SAA, Google Cloud
+       - "redes" → Cisco, CCNA, CCNP, Juniper, SDN, routing, switching, Fortinet, Palo Alto
+       - "segurança" → CompTIA Security+, CISSP, SC-200, CEH, Palo Alto, Fortinet, SOC, SIEM, pentest
+       - "virtualização" → VMware, vSphere, VCP, Hyper-V, KVM, Nutanix
+    b. Executa várias chamadas a search_certifications E search_experience com esses termos relacionados — não te limites à palavra exata usada pelo utilizador.
+    c. Após recolher os resultados, raciocina sobre competências implícitas: uma certificação Dell EMC demonstra competência em storage mesmo que "storage" não apareça no título; uma CCNA demonstra competência em redes.
+    d. Na tua resposta, indica a ligação explicitamente: "A Maria tem competência em storage, demonstrada pela sua certificação Dell EMC e experiência em administração SAN no CV." Não te limites a listar resultados — interpreta-os."""
 
 
 # ------------------------------------------------------------------ #

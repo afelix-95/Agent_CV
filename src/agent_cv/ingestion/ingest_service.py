@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import difflib
 import hashlib
+import logging
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 from pypdf import PdfReader
 
@@ -17,6 +21,28 @@ from agent_cv.ingestion.vision_extraction_service import (
 
 
 SUPPORTED = {".pdf", ".txt", ".docx"}
+
+
+def _resolve_employee_name(name: str, cur) -> str:
+    """Return the closest existing employee name if it looks like a typo.
+
+    Uses difflib sequence matching with a cutoff of 0.85 so that single-
+    character transpositions (e.g. "Galirto" vs "Galrito") are corrected
+    while genuinely different names are left unchanged.
+    """
+    cur.execute("SELECT full_name FROM employees")
+    existing = [row["full_name"] for row in cur.fetchall()]
+    if not existing:
+        return name
+    matches = difflib.get_close_matches(name, existing, n=1, cutoff=0.85)
+    if matches and matches[0] != name:
+        logger.warning(
+            "Ingestion: corrected employee name %r → %r (possible typo in filename)",
+            name,
+            matches[0],
+        )
+        return matches[0]
+    return name
 
 
 def _hash_file(path: Path) -> str:
@@ -174,6 +200,8 @@ def _ingest_one_file(
     text = _extract_text(actual_path)
     detected_language = detect_language(text)
 
+    resolved_name = _resolve_employee_name(parsed.employee_name, cur)
+
     cur.execute(
         """
         insert into employees (full_name)
@@ -181,7 +209,7 @@ def _ingest_one_file(
         on conflict (full_name) do update set updated_at = now()
         returning employee_id
         """,
-        (parsed.employee_name,),
+        (resolved_name,),
     )
     employee = cur.fetchone()
     employee_id = employee["employee_id"]
