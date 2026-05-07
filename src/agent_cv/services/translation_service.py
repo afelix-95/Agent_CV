@@ -8,8 +8,8 @@ Flow:
   1. Fetch raw CV text + employee metadata from the DB
   2. Call the LLM once to extract structured fields AND translate them
   3. Build a Europass XML v3.3.0 string from the structured data
-  4. Parse the XML and render an HTML page via Jinja2
-  5. Convert the HTML to PDF via WeasyPrint
+  4. Parse the XML into a structured context dict
+  5. Render the context dict to PDF bytes using fpdf2 (pure Python, no system deps)
   6. Save the PDF to /tmp/agent_cv_exports/{uuid}.pdf and return the export_id
 """
 
@@ -30,20 +30,281 @@ logger = logging.getLogger(__name__)
 # Optional heavy imports – imported lazily so unit tests don't require them
 # ---------------------------------------------------------------------------
 
-def _get_jinja_env():
-    from jinja2 import Environment, FileSystemLoader, select_autoescape
+def _fpdf2_context_to_pdf(ctx: dict) -> bytes:
+    """Render the Europass CV context dict to PDF bytes using fpdf2 (no system deps)."""
+    import fpdf as _fpdf_module
+    from fpdf import FPDF
 
-    templates_dir = Path(__file__).parent / "templates"
-    return Environment(
-        loader=FileSystemLoader(str(templates_dir)),
-        autoescape=select_autoescape(["html"]),
-    )
+    _font_dir = Path(_fpdf_module.__file__).parent / "fonts"
 
+    # ---- Layout constants (all in mm) -----------------------------------
+    SIDEBAR_W = 62
+    SB_PAD_L = 8
+    SB_PAD_R = 6
+    SB_TEXT_W = SIDEBAR_W - SB_PAD_L - SB_PAD_R
+    CONTENT_X = SIDEBAR_W + 8
+    CONTENT_W = 210 - CONTENT_X - 8
+    PAGE_BREAK_Y = 272
 
-def _weasyprint_html_to_pdf(html_string: str) -> bytes:
-    from weasyprint import HTML  # type: ignore
+    # ---- Colours --------------------------------------------------------
+    BLUE = (0, 51, 153)
+    LIGHT_BLUE = (170, 196, 255)
+    WHITE = (255, 255, 255)
+    DARK = (51, 51, 51)
+    GREY = (100, 100, 100)
 
-    return HTML(string=html_string).write_pdf()
+    labels = ctx.get("labels") or {}
+
+    # ---- FPDF subclass: draw blue sidebar background on every page ------
+    class _CV(FPDF):
+        def header(self):
+            self.set_fill_color(*BLUE)
+            self.rect(0, 0, SIDEBAR_W, 297, style="F")
+
+    pdf = _CV(format="A4")
+    pdf.set_auto_page_break(False)
+    pdf.add_font("DejaVu",  "",  str(_font_dir / "DejaVuSans.ttf"))
+    pdf.add_font("DejaVu",  "B", str(_font_dir / "DejaVuSans-Bold.ttf"))
+    pdf.add_font("DejaVu",  "I", str(_font_dir / "DejaVuSans-Oblique.ttf"))
+    pdf.add_page()
+
+    # ================================================================
+    # SIDEBAR
+    # ================================================================
+    # EU logo
+    pdf.set_xy(SB_PAD_L, 10)
+    pdf.set_font("DejaVu", "", 7)
+    pdf.set_text_color(*LIGHT_BLUE)
+    pdf.cell(SB_TEXT_W, 4, "europass")
+    pdf.set_xy(SB_PAD_L, 14)
+    pdf.set_font("DejaVu", "B", 8)
+    pdf.set_text_color(*WHITE)
+    pdf.cell(SB_TEXT_W, 4, "Curriculum Vitae")
+
+    # Photo placeholder
+    pdf.set_fill_color(26, 77, 179)
+    pdf.set_draw_color(*LIGHT_BLUE)
+    pdf.rect(SB_PAD_L, 20, 36, 36, style="FD")
+    pdf.set_font("DejaVu", "", 6.5)
+    pdf.set_text_color(*LIGHT_BLUE)
+    pdf.set_xy(SB_PAD_L, 35)
+    pdf.cell(36, 4, "Photo", align="C")
+
+    sb_y = 62.0
+
+    # Name
+    full_name = f"{ctx.get('first_name', '')} {ctx.get('surname', '')}".strip()
+    if full_name:
+        pdf.set_xy(SB_PAD_L, sb_y)
+        pdf.set_font("DejaVu", "B", 10)
+        pdf.set_text_color(*WHITE)
+        pdf.multi_cell(SB_TEXT_W, 5, full_name)
+        sb_y = pdf.get_y() + 2
+
+    # Headline
+    if ctx.get("headline"):
+        pdf.set_xy(SB_PAD_L, sb_y)
+        pdf.set_font("DejaVu", "I", 8)
+        pdf.set_text_color(*LIGHT_BLUE)
+        pdf.multi_cell(SB_TEXT_W, 4, ctx["headline"])
+        sb_y = pdf.get_y() + 3
+
+    def _sb_section(title: str) -> float:
+        nonlocal sb_y
+        pdf.set_xy(SB_PAD_L, sb_y)
+        pdf.set_font("DejaVu", "B", 7)
+        pdf.set_text_color(*LIGHT_BLUE)
+        pdf.cell(SB_TEXT_W, 4, title.upper())
+        line_y = sb_y + 4.5
+        pdf.set_draw_color(*LIGHT_BLUE)
+        pdf.line(SB_PAD_L, line_y, SIDEBAR_W - SB_PAD_R, line_y)
+        return line_y + 1.5
+
+    def _sb_item(text: str, y: float) -> float:
+        pdf.set_xy(SB_PAD_L, y)
+        pdf.set_font("DejaVu", "", 7.5)
+        pdf.set_text_color(*WHITE)
+        pdf.multi_cell(SB_TEXT_W, 4, str(text))
+        return pdf.get_y() + 0.5
+
+    # Contact section
+    sb_y = _sb_section(labels.get("contact", "Contact"))
+    for val in [ctx.get("address"), ctx.get("phone"), ctx.get("email"), ctx.get("website")]:
+        if val and sb_y < 250:
+            sb_y = _sb_item(val, sb_y)
+
+    # Personal info section
+    if sb_y < 240:
+        sb_y += 2
+        sb_y = _sb_section(labels.get("personal", "Personal info"))
+        for lbl_key, val in [
+            ("dob", ctx.get("birthdate")),
+            ("nationality", ctx.get("nationality")),
+            ("mother_tongue", ctx.get("mother_tongue")),
+        ]:
+            if val and sb_y < 255:
+                sb_y = _sb_item(f"{labels.get(lbl_key, lbl_key)}: {val}", sb_y)
+        if ctx.get("driving_licences") and sb_y < 258:
+            sb_y = _sb_item(
+                f"{labels.get('driving', 'Driving')}: {', '.join(ctx['driving_licences'])}",
+                sb_y,
+            )
+
+    # Footer
+    pdf.set_xy(SB_PAD_L, 284)
+    pdf.set_font("DejaVu", "", 6)
+    pdf.set_text_color(*LIGHT_BLUE)
+    pdf.cell(SB_TEXT_W, 4, labels.get("generated_with", "Agent CV"))
+
+    # ================================================================
+    # MAIN CONTENT
+    # ================================================================
+    cy = 12.0  # current Y position in main content
+
+    def _check_page_break(needed: float = 20) -> None:
+        nonlocal cy
+        if cy + needed > PAGE_BREAK_Y:
+            pdf.add_page()
+            cy = 12.0
+
+    def _section_header(title: str) -> None:
+        nonlocal cy
+        _check_page_break(10)
+        pdf.set_xy(CONTENT_X, cy)
+        pdf.set_fill_color(*BLUE)
+        pdf.set_text_color(*WHITE)
+        pdf.set_font("DejaVu", "B", 8.5)
+        pdf.cell(CONTENT_W, 6, f"  {title}", fill=True)
+        cy = pdf.get_y() + 2
+
+    def _timeline_entry(entry: dict, date_w: float = 26) -> None:
+        nonlocal cy
+        _check_page_break(15)
+        start_y = cy
+        detail_x = CONTENT_X + date_w + 2
+        detail_w = CONTENT_W - date_w - 2
+
+        # Date column (left)
+        from_d = entry.get("from_date") or ""
+        is_cur = entry.get("is_current", False)
+        to_d = labels.get("present", "Present") if is_cur else (entry.get("to_date") or "")
+        date_str = f"{from_d}\n{to_d}" if (from_d and to_d and from_d != to_d) else (from_d or to_d)
+        pdf.set_xy(CONTENT_X, start_y)
+        pdf.set_font("DejaVu", "", 7.5)
+        pdf.set_text_color(*GREY)
+        pdf.multi_cell(date_w, 4, date_str)
+        date_end_y = pdf.get_y()
+
+        # Detail column (right)
+        det_y = start_y
+        position = entry.get("position") or entry.get("title") or ""
+        if position:
+            pdf.set_xy(detail_x, det_y)
+            pdf.set_font("DejaVu", "B", 8.5)
+            pdf.set_text_color(*DARK)
+            pdf.multi_cell(detail_w, 4.5, position)
+            det_y = pdf.get_y()
+
+        employer = entry.get("employer_name") or entry.get("org_name") or ""
+        if employer:
+            city = entry.get("employer_city") or entry.get("org_city") or ""
+            country = entry.get("employer_country") or entry.get("org_country") or ""
+            loc = ", ".join(p for p in [city, country] if p)
+            org_line = f"{employer}{', ' + loc if loc else ''}"
+            pdf.set_xy(detail_x, det_y)
+            pdf.set_font("DejaVu", "I", 8)
+            pdf.set_text_color(*GREY)
+            pdf.multi_cell(detail_w, 4, org_line)
+            det_y = pdf.get_y()
+
+        activities = entry.get("activities") or ""
+        if activities:
+            pdf.set_xy(detail_x, det_y)
+            pdf.set_font("DejaVu", "", 8)
+            pdf.set_text_color(*DARK)
+            pdf.multi_cell(detail_w, 4, activities)
+            det_y = pdf.get_y()
+
+        cy = max(det_y, date_end_y) + 3
+
+    # Work Experience
+    if ctx.get("work_experience"):
+        _section_header(labels.get("work_experience", "Work Experience"))
+        for entry in ctx["work_experience"]:
+            _timeline_entry(entry)
+
+    # Education
+    if ctx.get("education"):
+        cy += 2
+        _section_header(labels.get("education", "Education and Training"))
+        for entry in ctx["education"]:
+            _timeline_entry(entry)
+
+    # Language Skills
+    if ctx.get("foreign_languages"):
+        cy += 2
+        _section_header(labels.get("language_skills", "Language Skills"))
+        col_w = CONTENT_W / 6
+        col_labels = [
+            labels.get("language", "Language"),
+            labels.get("listening", "Listening"),
+            labels.get("reading", "Reading"),
+            labels.get("spoken_interaction", "Spoken int."),
+            labels.get("spoken_production", "Spoken prod."),
+            labels.get("writing", "Writing"),
+        ]
+        _check_page_break(8)
+        pdf.set_xy(CONTENT_X, cy)
+        pdf.set_fill_color(230, 235, 255)
+        pdf.set_text_color(*DARK)
+        pdf.set_font("DejaVu", "B", 7)
+        for lbl in col_labels:
+            pdf.cell(col_w, 5, lbl, border="B", fill=True)
+        cy = pdf.get_y() + 1
+
+        for lang in ctx["foreign_languages"]:
+            _check_page_break(6)
+            pdf.set_xy(CONTENT_X, cy)
+            pdf.set_font("DejaVu", "", 7.5)
+            pdf.set_text_color(*DARK)
+            row_vals = [
+                lang.get("label") or lang.get("code") or "",
+                lang.get("listening") or "–",
+                lang.get("reading") or "–",
+                lang.get("spoken_interaction") or "–",
+                lang.get("spoken_production") or "–",
+                lang.get("writing") or "–",
+            ]
+            for val in row_vals:
+                pdf.cell(col_w, 5, val)
+            cy = pdf.get_y() + 1
+
+        if labels.get("cef_note"):
+            _check_page_break(8)
+            pdf.set_xy(CONTENT_X, cy)
+            pdf.set_font("DejaVu", "I", 6.5)
+            pdf.set_text_color(*GREY)
+            pdf.multi_cell(CONTENT_W, 3.5, labels["cef_note"])
+            cy = pdf.get_y() + 1
+
+    # Communication / Digital / Other Skills
+    for skill_key, label_key in [
+        ("communication_skills", "communication_skills"),
+        ("computer_skills", "computer_skills"),
+        ("other_skills", "other_skills"),
+    ]:
+        text = ctx.get(skill_key) or ""
+        if text:
+            cy += 2
+            _section_header(labels.get(label_key, label_key))
+            _check_page_break(10)
+            pdf.set_xy(CONTENT_X, cy)
+            pdf.set_font("DejaVu", "", 8)
+            pdf.set_text_color(*DARK)
+            pdf.multi_cell(CONTENT_W, 4, text)
+            cy = pdf.get_y() + 2
+
+    return bytes(pdf.output())
 
 
 # ---------------------------------------------------------------------------
@@ -576,7 +837,7 @@ def build_europass_xml(cv_data: dict, target_language: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# 4. Render PDF from XML (via Jinja2 + WeasyPrint)
+# 4. Render PDF from XML (via fpdf2)
 # ---------------------------------------------------------------------------
 
 def _xml_to_template_context(xml_str: str, cv_data: dict, target_language: str) -> dict:
@@ -685,12 +946,9 @@ def _xml_to_template_context(xml_str: str, cv_data: dict, target_language: str) 
 
 
 def render_pdf_from_xml(xml_str: str, cv_data: dict, target_language: str) -> bytes:
-    """Parse Europass XML, render via Jinja2 template, and return PDF bytes."""
+    """Parse Europass XML and render to PDF bytes using fpdf2."""
     ctx = _xml_to_template_context(xml_str, cv_data, target_language)
-    env = _get_jinja_env()
-    template = env.get_template("europass_cv.html")
-    html = template.render(**ctx)
-    return _weasyprint_html_to_pdf(html)
+    return _fpdf2_context_to_pdf(ctx)
 
 
 # ---------------------------------------------------------------------------

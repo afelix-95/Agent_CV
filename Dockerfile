@@ -18,23 +18,6 @@ LABEL org.opencontainers.image.version=$APP_VERSION \
 
 WORKDIR /app
 
-# System libraries required by WeasyPrint (Pango, GObject, Cairo, etc.)
-# Disable HTTP pipelining and caching to work around transparent proxy servers
-# that serve stale .deb content while the Packages index is already updated.
-RUN printf 'Acquire::http::Pipeline-Depth "0";\nAcquire::http::No-Cache "true";\nAcquire::BrokenProxy "true";\n' \
-        > /etc/apt/apt.conf.d/99nopipelining \
-    && apt-get update && apt-get install -y --no-install-recommends \
-        libglib2.0-0 \
-        libpango-1.0-0 \
-        libpangoft2-1.0-0 \
-        libpangocairo-1.0-0 \
-        libcairo2 \
-        libgdk-pixbuf-2.0-0 \
-        libffi8 \
-        shared-mime-info \
-        fonts-liberation \
-    && rm -rf /var/lib/apt/lists/*
-
 # Copy installed packages (deps + agent_cv package + metadata) from builder stage
 COPY --from=builder /install /usr/local
 
