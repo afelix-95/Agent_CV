@@ -3,14 +3,19 @@ Teams integration via Microsoft Graph Change Notifications (webhooks).
 
 The bot authenticates as the service account (GRAPH_USER_EMAIL) through the
 registered Entra app using the ROPC flow (see services/graph_service.py).
-At startup it creates a Graph subscription on /me/chats/getAllMessages, which
-causes Microsoft Graph to POST a notification to WEBHOOK_BASE_URL/webhooks/teams
-whenever a new message arrives in any chat the service account is part of.
-The bot then fetches the specific message and processes it through the Agent CV
-pipeline.
+At startup it creates two Graph subscriptions:
+  - /me/chats/getAllMessages  → POST to /graph-notifications/teams
+    Delivers a notification for every new chat message.
+  - /me/chats                 → POST to /graph-notifications/teams-chats
+    Delivers a notification the instant a new chat is created (e.g. an
+    external user initiating contact).  The handler immediately unhides /
+    accepts that chat so the message subscription starts firing for it
+    without waiting for the periodic poller.
 
-The subscription expires after 60 minutes (Graph delegated-auth maximum for chat
-messages) and is renewed automatically by a background task every 50 minutes.
+Both subscriptions expire after 60 minutes (Graph delegated-auth maximum)
+and are renewed automatically by a background task every 50 minutes.
+A periodic fallback poller (default every 30 min) also scans for any
+hidden or pending chats that slipped through.
 """
 from __future__ import annotations
 
@@ -46,6 +51,8 @@ _RESOURCE_RE = re.compile(
 )
 # Upper bound on the in-memory dedup set to prevent unbounded memory growth
 _MAX_PROCESSED_MSGS: int = 10_000
+# How often (seconds) to poll for pending/hidden chats — fallback safety net only
+_CHAT_POLL_INTERVAL_S: int = 1800  # 30 minutes
 
 
 class TeamsWebhookBot:
@@ -54,14 +61,19 @@ class TeamsWebhookBot:
 
     Lifecycle (managed by the FastAPI lifespan in main.py):
       await bot.start()  — resolves bot identity, creates subscription, starts renewal task
-      await bot.stop()   — cancels renewal task, deletes subscription
+                          and pending-chat poller
+      await bot.stop()   — cancels both background tasks, deletes subscription
       await bot.handle_notification(resource, client_state)  — called from the webhook route
     """
 
     def __init__(self) -> None:
         self._task: asyncio.Task | None = None
+        self._poll_task: asyncio.Task | None = None
         self._bot_user_id: str | None = None
+        # Subscription ID for /me/chats/getAllMessages (new message events)
         self._subscription_id: str | None = None
+        # Subscription ID for /me/chats (new chat created events)
+        self._chat_subscription_id: str | None = None
         # chat IDs for which acceptance has succeeded
         self._accepted_chats: set[str] = set()
         # Dedup set to prevent double-processing the same message (Graph can re-deliver)
@@ -91,30 +103,40 @@ class TeamsWebhookBot:
             self._startup_then_renewal_loop(renew_interval),
             name="graph-subscription-renewal",
         )
+        self._poll_task = asyncio.create_task(
+            self._pending_chat_poll_loop(),
+            name="pending-chat-poller",
+        )
         logger.info(
             "Teams webhook bot initialised (subscription will be created once server is ready, account=%s)",
             settings.graph_user_email,
         )
 
     async def stop(self) -> None:
-        if self._task and not self._task.done():
-            self._task.cancel()
-            try:
-                await self._task
-            except asyncio.CancelledError:
-                pass
+        for task in (self._task, self._poll_task):
+            if task and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
 
-        if self._subscription_id:
-            try:
-                token = await asyncio.to_thread(get_access_token)
-                async with httpx.AsyncClient(timeout=10.0) as http:
-                    await http.delete(
-                        f"https://graph.microsoft.com/v1.0/subscriptions/{self._subscription_id}",
-                        headers={"Authorization": f"Bearer {token}"},
-                    )
-                logger.info("Teams webhook bot: deleted subscription %s", self._subscription_id)
-            except Exception:
-                logger.exception("Teams webhook bot: failed to delete subscription on shutdown")
+        try:
+            token = await asyncio.to_thread(get_access_token)
+            async with httpx.AsyncClient(timeout=10.0) as http:
+                for sub_id in filter(None, [self._subscription_id, self._chat_subscription_id]):
+                    try:
+                        await http.delete(
+                            f"https://graph.microsoft.com/v1.0/subscriptions/{sub_id}",
+                            headers={"Authorization": f"Bearer {token}"},
+                        )
+                        logger.info("Teams webhook bot: deleted subscription %s", sub_id)
+                    except Exception:
+                        logger.exception(
+                            "Teams webhook bot: failed to delete subscription %s on shutdown", sub_id
+                        )
+        except Exception:
+            logger.exception("Teams webhook bot: failed to acquire token for subscription cleanup")
 
         logger.info("Teams webhook bot stopped")
 
@@ -212,7 +234,7 @@ class TeamsWebhookBot:
             except Exception:
                 if attempt == 5:
                     logger.exception(
-                        "Teams webhook bot: failed to create initial subscription after %d attempts",
+                        "Teams webhook bot: failed to create initial message subscription after %d attempts",
                         attempt,
                     )
                     return
@@ -223,6 +245,29 @@ class TeamsWebhookBot:
                     wait,
                 )
                 await asyncio.sleep(wait)
+
+        # Create the /me/chats subscription (new-chat events) with the same retry logic
+        for attempt in range(1, 6):
+            try:
+                await self._create_chat_subscription()
+                break
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                if attempt == 5:
+                    logger.exception(
+                        "Teams webhook bot: failed to create initial chat subscription after %d attempts — "
+                        "falling back to poller only",
+                        attempt,
+                    )
+                else:
+                    wait = attempt * 10
+                    logger.warning(
+                        "Teams webhook bot: chat subscription attempt %d failed, retrying in %ds",
+                        attempt,
+                        wait,
+                    )
+                    await asyncio.sleep(wait)
 
         await self._renewal_loop(renew_interval)
 
@@ -246,11 +291,14 @@ class TeamsWebhookBot:
                     )
                     return
 
-                our_url = f"{settings.webhook_base_url}/graph-notifications/teams"
+                our_urls = {
+                    f"{settings.webhook_base_url}/graph-notifications/teams".rstrip("/"),
+                    f"{settings.webhook_base_url}/graph-notifications/teams-chats".rstrip("/"),
+                }
                 stale = [
                     s["id"]
                     for s in resp.json().get("value", [])
-                    if s.get("notificationUrl", "").rstrip("/") == our_url.rstrip("/")
+                    if s.get("notificationUrl", "").rstrip("/") in our_urls
                 ]
 
                 for sub_id in stale:
@@ -269,31 +317,286 @@ class TeamsWebhookBot:
         except Exception:
             logger.exception("Teams webhook bot: error during stale subscription cleanup")
 
+    async def _create_chat_subscription(self) -> None:
+        """Create (or renew) a Graph subscription on /me/chats so we are notified
+        immediately when a new chat appears — e.g. an external user initiating contact."""
+        expiry = datetime.now(timezone.utc) + timedelta(seconds=_SUBSCRIPTION_LIFETIME_S)
+        expiry_str = expiry.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        token = await asyncio.to_thread(get_access_token)
+
+        async with httpx.AsyncClient(timeout=15.0) as http:
+            if self._chat_subscription_id:
+                resp = await http.patch(
+                    f"https://graph.microsoft.com/v1.0/subscriptions/{self._chat_subscription_id}",
+                    headers={
+                        "Authorization": f"Bearer {token}",
+                        "Content-Type": "application/json",
+                    },
+                    json={"expirationDateTime": expiry_str},
+                )
+                if resp.status_code == 200:
+                    logger.info(
+                        "Teams webhook bot: chat subscription %s renewed until %s",
+                        self._chat_subscription_id,
+                        expiry_str,
+                    )
+                    return
+                logger.warning(
+                    "Teams webhook bot: chat subscription renew returned HTTP %s — will recreate",
+                    resp.status_code,
+                )
+                self._chat_subscription_id = None
+
+            resp = await http.post(
+                "https://graph.microsoft.com/v1.0/subscriptions",
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "changeType": "created",
+                    "notificationUrl": f"{settings.webhook_base_url}/graph-notifications/teams-chats",
+                    "resource": "/me/chats",
+                    "expirationDateTime": expiry_str,
+                    "clientState": settings.webhook_secret,
+                },
+            )
+
+        if resp.status_code == 201:
+            self._chat_subscription_id = resp.json()["id"]
+            logger.info(
+                "Teams webhook bot: created chat subscription %s (expires %s)",
+                self._chat_subscription_id,
+                expiry_str,
+            )
+        else:
+            raise RuntimeError(
+                f"Failed to create Graph chat subscription: HTTP {resp.status_code}: {resp.text[:300]}"
+            )
+
     async def _renewal_loop(self, interval: int) -> None:
         while True:
             await asyncio.sleep(interval)
-            # Retry up to 5 times with back-off before giving up on this renewal cycle
-            for attempt in range(1, 6):
-                try:
-                    await self._create_subscription()
-                    break
-                except asyncio.CancelledError:
-                    raise
-                except Exception:
-                    if attempt == 5:
-                        logger.exception(
-                            "Teams webhook bot: subscription renewal failed after %d attempts — "
-                            "will retry at next interval",
-                            attempt,
+            # Renew both subscriptions; failures on either are logged but don't abort the loop
+            for create_fn, label in [
+                (self._create_subscription, "message"),
+                (self._create_chat_subscription, "chat"),
+            ]:
+                for attempt in range(1, 6):
+                    try:
+                        await create_fn()
+                        break
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        if attempt == 5:
+                            logger.exception(
+                                "Teams webhook bot: %s subscription renewal failed after %d attempts — "
+                                "will retry at next interval",
+                                label,
+                                attempt,
+                            )
+                        else:
+                            wait = attempt * 15
+                            logger.warning(
+                                "Teams webhook bot: %s subscription renewal attempt %d failed, retrying in %ds",
+                                label,
+                                attempt,
+                                wait,
+                            )
+                            await asyncio.sleep(wait)
+
+    # ------------------------------------------------------------------ #
+    # Pending / hidden chat poller                                        #
+    # ------------------------------------------------------------------ #
+
+    async def _pending_chat_poll_loop(self) -> None:
+        """Periodically fetch all chats visible to the service account and
+        unhide / accept any that are hidden or have a pending membership.
+
+        This fixes two problems:
+        1. External users whose first message lands as a pending request —
+           Graph does not fire change notifications for pending chats, so the
+           reactive _accept_chat() path is never reached.  The poller accepts
+           those chats proactively so subsequent messages are notified normally.
+        2. Previously-accepted external chats that Teams re-hides after a
+           period of inactivity — once hidden the subscription stops delivering
+           notifications for that chat.
+
+        The loop runs every _CHAT_POLL_INTERVAL_S seconds (default 5 min).
+        """
+        # Short initial delay so startup noise settles first
+        await asyncio.sleep(15)
+        while True:
+            try:
+                await self._accept_pending_and_hidden_chats()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Teams webhook bot: error in pending-chat poll loop")
+            await asyncio.sleep(_CHAT_POLL_INTERVAL_S)
+
+    async def _accept_pending_and_hidden_chats(self) -> None:
+        """Single pass: list all chats, then unhide hidden ones and accept
+        any pending memberships the service account has been invited to."""
+        if not self._bot_user_id:
+            return
+
+        token = await asyncio.to_thread(get_access_token)
+        headers = {"Authorization": f"Bearer {token}"}
+
+        async with httpx.AsyncClient(timeout=20.0) as http:
+            # 1. Fetch all chats (the service account may have many; page through them)
+            url: str | None = (
+                "https://graph.microsoft.com/v1.0/me/chats"
+                "?$select=id,chatType,viewpoint&$top=50"
+            )
+            chats_processed = 0
+            while url:
+                resp = await http.get(url, headers=headers)
+                if resp.status_code != 200:
+                    logger.warning(
+                        "Teams webhook bot: chat list returned HTTP %s — %s",
+                        resp.status_code,
+                        resp.text[:300],
+                    )
+                    return
+                data = resp.json()
+                for chat in data.get("value", []):
+                    chat_id: str = chat.get("id", "")
+                    if not chat_id:
+                        continue
+                    viewpoint = chat.get("viewpoint") or {}
+                    is_hidden = viewpoint.get("isHidden", False)
+                    if is_hidden:
+                        logger.info(
+                            "Teams webhook bot: chat %s is hidden — calling unhideForUser",
+                            chat_id,
                         )
-                    else:
-                        wait = attempt * 15
-                        logger.warning(
-                            "Teams webhook bot: renewal attempt %d failed, retrying in %ds",
-                            attempt,
-                            wait,
-                        )
-                        await asyncio.sleep(wait)
+                        await self._unhide_chat(http, headers, chat_id)
+                    chats_processed += 1
+                url = data.get("@odata.nextLink")
+
+            logger.debug(
+                "Teams webhook bot: pending-chat poll complete (%d chats checked)",
+                chats_processed,
+            )
+
+            # 2. Accept any pending membership invitations.
+            # Graph exposes these under /me/joinedTeams for Teams channels, but for
+            # 1:1 and group chats the pending state is surfaced via the viewpoint
+            # isHidden flag handled above.  Additionally check the
+            # /me/chats?$filter=... pending endpoint if available.
+            await self._accept_pending_memberships(http, headers)
+
+    async def _unhide_chat(
+        self,
+        http: httpx.AsyncClient,
+        headers: dict,
+        chat_id: str,
+    ) -> None:
+        """Call unhideForUser to make a hidden chat visible again so the
+        Graph subscription resumes delivering notifications for it."""
+        resp = await http.post(
+            f"https://graph.microsoft.com/v1.0/chats/{chat_id}/unhideForUser",
+            headers={**headers, "Content-Type": "application/json"},
+            json={
+                "user": {
+                    "@odata.type": "#microsoft.graph.teamworkUserIdentity",
+                    "id": self._bot_user_id,
+                    "tenantId": settings.teams_bot_tenant_id,
+                }
+            },
+        )
+        if resp.status_code in (200, 204):
+            logger.info("Teams webhook bot: unhid chat %s via poller", chat_id)
+            self._accepted_chats.add(chat_id)
+        else:
+            logger.warning(
+                "Teams webhook bot: unhideForUser (poller) returned HTTP %s for %s: %s",
+                resp.status_code,
+                chat_id,
+                resp.text[:300],
+            )
+
+    async def _accept_pending_memberships(
+        self,
+        http: httpx.AsyncClient,
+        headers: dict,
+    ) -> None:
+        """Accept pending chat membership invitations via the members endpoint.
+
+        When an external user starts a brand-new 1:1 with the service account,
+        Teams creates a chatMember entry in state 'pending'.  We enumerate all
+        1:1 chats and accept any pending membership we find for the bot's own
+        user ID.
+        """
+        # List 1:1 chats only (oneOnOne), paging through results
+        url: str | None = (
+            "https://graph.microsoft.com/v1.0/me/chats"
+            "?$filter=chatType eq 'oneOnOne'&$select=id&$top=50"
+        )
+        while url:
+            resp = await http.get(url, headers=headers)
+            if resp.status_code != 200:
+                logger.debug(
+                    "Teams webhook bot: membership poll: chat list HTTP %s", resp.status_code
+                )
+                return
+            data = resp.json()
+            for chat in data.get("value", []):
+                chat_id: str = chat.get("id", "")
+                if not chat_id:
+                    continue
+                await self._accept_pending_member(http, headers, chat_id)
+            url = data.get("@odata.nextLink")
+
+    async def _accept_pending_member(
+        self,
+        http: httpx.AsyncClient,
+        headers: dict,
+        chat_id: str,
+    ) -> None:
+        """Accept pending membership for the bot's own account in a given chat."""
+        members_resp = await http.get(
+            f"https://graph.microsoft.com/v1.0/chats/{chat_id}/members",
+            headers=headers,
+        )
+        if members_resp.status_code != 200:
+            return
+        for member in members_resp.json().get("value", []):
+            user_id = (member.get("userId") or "")
+            membership_id = member.get("id", "")
+            # Only act on our own membership if it is in a pending/unknown state
+            if user_id != self._bot_user_id:
+                continue
+            visible_history_start = member.get("visibleHistoryStartDateTime")
+            # Graph does not expose a "pending" boolean directly; a missing
+            # visibleHistoryStartDateTime on our own membership is a reliable
+            # indicator that the membership has not been acknowledged yet.
+            if visible_history_start is not None:
+                continue
+            if not membership_id:
+                continue
+            accept_resp = await http.post(
+                f"https://graph.microsoft.com/v1.0/chats/{chat_id}/members/{membership_id}/acceptMembership",
+                headers={**headers, "Content-Type": "application/json"},
+                json={},
+            )
+            if accept_resp.status_code in (200, 204):
+                logger.info(
+                    "Teams webhook bot: accepted pending membership %s in chat %s",
+                    membership_id,
+                    chat_id,
+                )
+                self._accepted_chats.add(chat_id)
+            else:
+                logger.warning(
+                    "Teams webhook bot: acceptMembership returned HTTP %s for chat %s: %s",
+                    accept_resp.status_code,
+                    chat_id,
+                    accept_resp.text[:300],
+                )
 
     # ------------------------------------------------------------------ #
     # Notification handling (called from the webhook route)               #
@@ -382,6 +685,40 @@ class TeamsWebhookBot:
             "Teams webhook bot: new message %s in chat %s — %.80s", message_id, chat_id, text
         )
         await self._handle_message(client, chat_id, message_id, text, sender_id)
+
+    async def handle_chat_notification(self, resource: str, client_state: str) -> None:
+        """Handle a Graph change notification for /me/chats (new chat created).
+
+        Graph fires this the instant a new chat appears in the service account's
+        list — typically when an external user initiates first contact.  We
+        immediately unhide / accept the chat so the message subscription starts
+        delivering notifications for it without waiting for the periodic poller.
+        """
+        if client_state != settings.webhook_secret:
+            logger.warning(
+                "Teams webhook bot: chat notification with unexpected clientState, ignoring"
+            )
+            return
+
+        # resource is typically "chats('chatId')" or "chats/chatId"
+        m = re.search(r"chats[/(']+([^/')]+)", resource)
+        if not m:
+            logger.warning(
+                "Teams webhook bot: could not parse chat resource URL: %s", resource
+            )
+            return
+
+        chat_id = m.group(1)
+        logger.info(
+            "Teams webhook bot: new chat notification for %s — accepting immediately", chat_id
+        )
+
+        if chat_id not in self._accepted_chats:
+            token = await asyncio.to_thread(get_access_token)
+            headers = {"Authorization": f"Bearer {token}"}
+            async with httpx.AsyncClient(timeout=10.0) as http:
+                await self._unhide_chat(http, headers, chat_id)
+                await self._accept_pending_member(http, headers, chat_id)
 
     # ------------------------------------------------------------------ #
     # Chat acceptance (federated / external chats)                        #

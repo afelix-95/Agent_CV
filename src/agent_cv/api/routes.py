@@ -135,22 +135,103 @@ async def teams_webhook(
     request: Request,
     validationToken: str | None = Query(default=None),
 ) -> Response:
+    import logging as _logging
+    _wh_log = _logging.getLogger("agent_cv.webhook")
+
     # Graph subscription validation handshake: echo the token back as text/plain
     if validationToken:
+        _wh_log.info("Teams webhook: Graph validation handshake received")
         return PlainTextResponse(validationToken, status_code=200)
 
-    body = await request.json()
+    raw_body = await request.body()
+    _wh_log.debug("Teams webhook: raw payload (%d bytes): %s", len(raw_body), raw_body[:2000])
+
+    try:
+        body = await request.json()
+    except Exception:
+        _wh_log.warning("Teams webhook: failed to parse JSON body: %s", raw_body[:500])
+        return Response(status_code=400)
+
     notifications = body.get("value", [])
+    _wh_log.info(
+        "Teams webhook: received %d notification(s) from Graph", len(notifications)
+    )
+
     bot = get_teams_bot()
-    for notification in notifications:
-        # Only process new-message events; ignore lifecycle/missed notifications
-        if notification.get("changeType") != "created":
-            continue
+    for idx, notification in enumerate(notifications):
+        change_type = notification.get("changeType", "")
         resource = notification.get("resource", "")
+        lifecycle = notification.get("lifecycleEvent", "")
+        _wh_log.info(
+            "Teams webhook: notification[%d] changeType=%r resource=%r lifecycleEvent=%r",
+            idx,
+            change_type,
+            resource,
+            lifecycle,
+        )
+        # Only process new-message events; ignore lifecycle/missed notifications
+        if change_type != "created":
+            _wh_log.debug(
+                "Teams webhook: skipping notification[%d] — changeType is %r, not 'created'",
+                idx,
+                change_type,
+            )
+            continue
         client_state = notification.get("clientState", "")
         asyncio.create_task(bot.handle_notification(resource, client_state))
 
     # Return 202 immediately — processing happens in background tasks
+    return Response(status_code=202)
+
+
+@router.post("/graph-notifications/teams-chats")
+async def teams_chats_webhook(
+    request: Request,
+    validationToken: str | None = Query(default=None),
+) -> Response:
+    """Webhook for /me/chats subscription — fires when a new chat is created.
+
+    This gives near-instant acceptance of external/pending chats without
+    waiting for the periodic poller.
+    """
+    import logging as _logging
+    _wh_log = _logging.getLogger("agent_cv.webhook")
+
+    if validationToken:
+        _wh_log.info("Teams chats webhook: Graph validation handshake received")
+        return PlainTextResponse(validationToken, status_code=200)
+
+    raw_body = await request.body()
+    _wh_log.debug(
+        "Teams chats webhook: raw payload (%d bytes): %s", len(raw_body), raw_body[:2000]
+    )
+
+    try:
+        body = await request.json()
+    except Exception:
+        _wh_log.warning("Teams chats webhook: failed to parse JSON body: %s", raw_body[:500])
+        return Response(status_code=400)
+
+    notifications = body.get("value", [])
+    _wh_log.info(
+        "Teams chats webhook: received %d notification(s) from Graph", len(notifications)
+    )
+
+    bot = get_teams_bot()
+    for idx, notification in enumerate(notifications):
+        change_type = notification.get("changeType", "")
+        resource = notification.get("resource", "")
+        _wh_log.info(
+            "Teams chats webhook: notification[%d] changeType=%r resource=%r",
+            idx,
+            change_type,
+            resource,
+        )
+        if change_type != "created":
+            continue
+        client_state = notification.get("clientState", "")
+        asyncio.create_task(bot.handle_chat_notification(resource, client_state))
+
     return Response(status_code=202)
 
 
