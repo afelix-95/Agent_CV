@@ -19,8 +19,9 @@ LABEL org.opencontainers.image.version=$APP_VERSION \
 WORKDIR /app
 
 # System libraries required by WeasyPrint (Pango, GObject, Cairo, etc.)
+# Note: in bookworm, GObject is bundled in libglib2.0-0 (no standalone libgobject-2.0-0)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        libgobject-2.0-0 \
+        libglib2.0-0 \
         libpango-1.0-0 \
         libpangoft2-1.0-0 \
         libpangocairo-1.0-0 \
