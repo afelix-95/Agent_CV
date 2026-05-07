@@ -30,12 +30,27 @@ logger = logging.getLogger(__name__)
 # Optional heavy imports – imported lazily so unit tests don't require them
 # ---------------------------------------------------------------------------
 
-def _fpdf2_context_to_pdf(ctx: dict) -> bytes:
-    """Render the Europass CV context dict to PDF bytes using fpdf2 (no system deps)."""
-    import fpdf as _fpdf_module
-    from fpdf import FPDF
+def _find_dejavu_font(name: str) -> Path:
+    """Locate a DejaVu TTF — bundled package fonts take priority over system paths."""
+    candidates = [
+        Path(__file__).parent.parent / "fonts" / name,       # bundled in package
+        Path("/usr/share/fonts/truetype/dejavu") / name,     # Debian/Ubuntu
+        Path("/usr/share/fonts/dejavu") / name,              # Fedora/RHEL
+        Path("/usr/share/fonts/TTF") / name,                 # Arch
+        Path("C:/Windows/Fonts") / name,                     # Windows
+    ]
+    for p in candidates:
+        if p.exists():
+            return p
+    raise FileNotFoundError(
+        f"DejaVu font '{name}' not found. "
+        "Place it in src/agent_cv/fonts/ or install 'fonts-dejavu-core'."
+    )
 
-    _font_dir = Path(_fpdf_module.__file__).parent / "fonts"
+
+def _fpdf2_context_to_pdf(ctx: dict) -> bytes:
+    """Render the Europass CV context dict to PDF bytes using fpdf2."""
+    from fpdf import FPDF
 
     # ---- Layout constants (all in mm) -----------------------------------
     SIDEBAR_W = 62
@@ -63,9 +78,9 @@ def _fpdf2_context_to_pdf(ctx: dict) -> bytes:
 
     pdf = _CV(format="A4")
     pdf.set_auto_page_break(False)
-    pdf.add_font("DejaVu",  "",  str(_font_dir / "DejaVuSans.ttf"))
-    pdf.add_font("DejaVu",  "B", str(_font_dir / "DejaVuSans-Bold.ttf"))
-    pdf.add_font("DejaVu",  "I", str(_font_dir / "DejaVuSans-Oblique.ttf"))
+    pdf.add_font("DejaVu",  "",  str(_find_dejavu_font("DejaVuSans.ttf")))
+    pdf.add_font("DejaVu",  "B", str(_find_dejavu_font("DejaVuSans-Bold.ttf")))
+    pdf.add_font("DejaVu",  "I", str(_find_dejavu_font("DejaVuSans-Oblique.ttf")))
     pdf.add_page()
 
     # ================================================================
