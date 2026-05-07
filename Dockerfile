@@ -19,7 +19,8 @@ LABEL org.opencontainers.image.version=$APP_VERSION \
 WORKDIR /app
 
 # System libraries required by WeasyPrint (Pango, GObject, Cairo, etc.)
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# --fix-missing retries with a mirror fallback on transient hash-mismatch errors.
+RUN apt-get update && apt-get install -y --no-install-recommends --fix-missing \
         libgobject-2.0-0 \
         libpango-1.0-0 \
         libpangoft2-1.0-0 \
