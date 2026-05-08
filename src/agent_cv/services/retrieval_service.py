@@ -10,7 +10,8 @@ from openai import AzureOpenAI
 from agent_cv.config import settings
 from agent_cv.db.connection import get_connection
 
-MAX_CONTEXT_SNIPPETS = 20
+MAX_CONTEXT_SNIPPETS = 20        # used only when scoped to a specific employee
+SNIPPETS_PER_EMPLOYEE = 3        # max snippets per employee in broad (unscoped) searches
 MAX_CONTEXT_TEXT_CHARS = 1800
 
 
@@ -88,47 +89,102 @@ def _embed_query(query: str) -> list[float]:
 def _search_semantic_chunks(query_vector: list[float], intent: str, scoped_names: list[str]) -> list[RetrievedSnippet]:
     vector_literal = str(query_vector)
     scoped_names_param = scoped_names or None
+    is_scoped = bool(scoped_names)
 
-    if intent == "certifications":
-        sql = """
-            select
-                e.full_name as employee_name,
-                coalesce(sd.original_filename, c.cert_name, 'certification') as source,
-                left(coalesce(cc.chunk_text, c.cert_name, ''), %s) as chunk_text,
-                1 - (cc.embedding <=> %s::vector) as score
-            from certification_chunks cc
-            join certifications c on c.certification_id = cc.certification_id
-            join employees e on e.employee_id = c.employee_id
-            left join document_versions dv on dv.document_version_id = c.document_version_id
-            left join source_documents sd on sd.document_id = dv.document_id
-            where (%s::text[] is null or e.full_name = any(%s))
-            order by cc.embedding <=> %s::vector
-            limit %s
-        """
+    # When scoped to specific employees, return up to MAX_CONTEXT_SNIPPETS flat.
+    # When unscoped (broad query), return up to SNIPPETS_PER_EMPLOYEE per employee
+    # so that ALL matching employees appear rather than a few dominating the limit.
+    if is_scoped:
+        if intent == "certifications":
+            sql = """
+                select
+                    e.full_name as employee_name,
+                    coalesce(sd.original_filename, c.cert_name, 'certification') as source,
+                    left(coalesce(cc.chunk_text, c.cert_name, ''), %s) as chunk_text,
+                    1 - (cc.embedding <=> %s::vector) as score
+                from certification_chunks cc
+                join certifications c on c.certification_id = cc.certification_id
+                join employees e on e.employee_id = c.employee_id
+                left join document_versions dv on dv.document_version_id = c.document_version_id
+                left join source_documents sd on sd.document_id = dv.document_id
+                where e.full_name = any(%s)
+                order by cc.embedding <=> %s::vector
+                limit %s
+            """
+        else:
+            sql = """
+                select
+                    e.full_name as employee_name,
+                    coalesce(sd.original_filename, 'cv') as source,
+                    left(cc.chunk_text, %s) as chunk_text,
+                    1 - (cc.embedding <=> %s::vector) as score
+                from cv_chunks cc
+                join employees e on e.employee_id = cc.employee_id
+                left join document_versions dv on dv.document_version_id = cc.document_version_id
+                left join source_documents sd on sd.document_id = dv.document_id
+                where e.full_name = any(%s)
+                order by cc.embedding <=> %s::vector
+                limit %s
+            """
+        params = [
+            MAX_CONTEXT_TEXT_CHARS,
+            vector_literal,
+            scoped_names_param,
+            vector_literal,
+            MAX_CONTEXT_SNIPPETS,
+        ]
     else:
-        sql = """
-            select
-                e.full_name as employee_name,
-                coalesce(sd.original_filename, 'cv') as source,
-                left(cc.chunk_text, %s) as chunk_text,
-                1 - (cc.embedding <=> %s::vector) as score
-            from cv_chunks cc
-            join employees e on e.employee_id = cc.employee_id
-            left join document_versions dv on dv.document_version_id = cc.document_version_id
-            left join source_documents sd on sd.document_id = dv.document_id
-            where (%s::text[] is null or e.full_name = any(%s))
-            order by cc.embedding <=> %s::vector
-            limit %s
-        """
-
-    params = [
-        MAX_CONTEXT_TEXT_CHARS,
-        vector_literal,
-        scoped_names_param,
-        scoped_names_param,
-        vector_literal,
-        MAX_CONTEXT_SNIPPETS,
-    ]
+        # Broad unscoped search: rank chunks per employee, keep top SNIPPETS_PER_EMPLOYEE each.
+        # This guarantees every employee with any match appears in the results.
+        if intent == "certifications":
+            sql = """
+                select employee_name, source, chunk_text, score
+                from (
+                    select
+                        e.full_name as employee_name,
+                        coalesce(sd.original_filename, c.cert_name, 'certification') as source,
+                        left(coalesce(cc.chunk_text, c.cert_name, ''), %s) as chunk_text,
+                        1 - (cc.embedding <=> %s::vector) as score,
+                        row_number() over (
+                            partition by e.employee_id
+                            order by cc.embedding <=> %s::vector
+                        ) as rn
+                    from certification_chunks cc
+                    join certifications c on c.certification_id = cc.certification_id
+                    join employees e on e.employee_id = c.employee_id
+                    left join document_versions dv on dv.document_version_id = c.document_version_id
+                    left join source_documents sd on sd.document_id = dv.document_id
+                ) ranked
+                where rn <= %s
+                order by score desc
+            """
+        else:
+            sql = """
+                select employee_name, source, chunk_text, score
+                from (
+                    select
+                        e.full_name as employee_name,
+                        coalesce(sd.original_filename, 'cv') as source,
+                        left(cc.chunk_text, %s) as chunk_text,
+                        1 - (cc.embedding <=> %s::vector) as score,
+                        row_number() over (
+                            partition by e.employee_id
+                            order by cc.embedding <=> %s::vector
+                        ) as rn
+                    from cv_chunks cc
+                    join employees e on e.employee_id = cc.employee_id
+                    left join document_versions dv on dv.document_version_id = cc.document_version_id
+                    left join source_documents sd on sd.document_id = dv.document_id
+                ) ranked
+                where rn <= %s
+                order by score desc
+            """
+        params = [
+            MAX_CONTEXT_TEXT_CHARS,
+            vector_literal,
+            vector_literal,
+            SNIPPETS_PER_EMPLOYEE,
+        ]
 
     try:
         with get_connection() as conn:
@@ -139,9 +195,14 @@ def _search_semantic_chunks(query_vector: list[float], intent: str, scoped_names
         return []
 
     snippets: list[RetrievedSnippet] = []
+    # Apply a minimum relevance threshold for broad searches to avoid noise.
+    min_score = 0.25 if not is_scoped else 0.0
     for row in rows:
         text = (row.get("chunk_text") or "").strip()
         if not text:
+            continue
+        score = float(row.get("score") or 0.0)
+        if score < min_score:
             continue
         snippets.append(
             RetrievedSnippet(
