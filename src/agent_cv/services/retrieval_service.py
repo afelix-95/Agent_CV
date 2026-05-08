@@ -11,7 +11,8 @@ from agent_cv.config import settings
 from agent_cv.db.connection import get_connection
 
 MAX_CONTEXT_SNIPPETS = 20        # used only when scoped to a specific employee
-SNIPPETS_PER_EMPLOYEE = 3        # max snippets per employee in broad (unscoped) searches
+SNIPPETS_PER_EMPLOYEE = 2        # max snippets per employee in broad (unscoped) searches
+RELATIVE_SCORE_THRESHOLD = 0.30  # include employee only if score >= best_score * this
 MAX_CONTEXT_TEXT_CHARS = 1800
 
 
@@ -195,14 +196,34 @@ def _search_semantic_chunks(query_vector: list[float], intent: str, scoped_names
         return []
 
     snippets: list[RetrievedSnippet] = []
-    # Apply a minimum relevance threshold for broad searches to avoid noise.
-    min_score = 0.25 if not is_scoped else 0.0
+    # For broad searches apply a RELATIVE threshold so we never exclude employees
+    # just because the query is easy (high scores) or hard (low scores).
+    # Any employee whose best snippet is >= RELATIVE_SCORE_THRESHOLD * max_score is kept.
+    # For scoped searches (specific employee requested) no threshold is applied.
+    if not is_scoped and rows:
+        max_score = max(float(r.get("score") or 0.0) for r in rows)
+        min_score = max(0.10, max_score * RELATIVE_SCORE_THRESHOLD)
+    else:
+        min_score = 0.0
+
+    # Track each employee's highest score seen so far to apply the per-employee gate.
+    best_score_per_employee: dict[str, float] = {}
+    for row in rows:
+        emp = row.get("employee_name") or "Unknown"
+        s = float(row.get("score") or 0.0)
+        if s > best_score_per_employee.get(emp, 0.0):
+            best_score_per_employee[emp] = s
+
+    included_employees = {emp for emp, s in best_score_per_employee.items() if s >= min_score}
+
     for row in rows:
         text = (row.get("chunk_text") or "").strip()
         if not text:
             continue
         score = float(row.get("score") or 0.0)
         if score < min_score:
+            continue
+        if row.get("employee_name") not in included_employees:
             continue
         snippets.append(
             RetrievedSnippet(

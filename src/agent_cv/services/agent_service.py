@@ -330,7 +330,9 @@ HOW TO RESPOND:
     b. ALSO call search_experience with the same keyword to find employees who have CV evidence (work experience, projects) even without formal certifications.
     c. After gathering results, reason about implicit competencies: a Dell EMC certification demonstrates storage expertise even if "storage" does not appear in the cert title; a CCNA demonstrates networking expertise.
     d. In your answer, state the connection explicitly: "Maria has storage expertise, demonstrated by her Dell EMC certification and SAN administration experience in her CV." Do not just list raw results — interpret them.
-    e. If both search_certifications and search_experience return results for the same employee, consolidate them into one block per person.
+    e. IMPORTANT: search_experience returns a "total_employees" count and an "employees" list. You MUST list ALL employees in that list — do not skip or summarise away any person. If someone has a lower relevance score they may still have real experience. Every employee returned is relevant.
+    f. If both search_certifications and search_experience return results for the same employee, consolidate them into one block per person.
+    g. BREVITY IN BROAD QUERIES — for a broad "who has X" question, list at most 2 certifications per employee and summarise the rest (e.g. "...and 4 more VMware certifications"). The goal is to list ALL people, not to exhaustively detail each one. The user can ask for full details on any specific person afterwards.
 18. CERTIFICATE FILE SHARING — when the user asks to share, see, or download an employee's certificate files, verification letters, or certification documents (not their CV):
     - Call get_employee_cert_files with the employee's name.
     - If found=true and single=true: reply with a message and include the returned URL as a hyperlink.
@@ -396,7 +398,9 @@ COMO RESPONDER:
     b. Chama TAMBÉM search_experience com a mesma palavra-chave para encontrar colaboradores com evidência no CV (experiência profissional, projetos) mesmo sem certificações formais.
     c. Após recolher os resultados, raciocina sobre competências implícitas: uma certificação Dell EMC demonstra competência em storage mesmo que "storage" não apareça no título; uma CCNA demonstra competência em redes.
     d. Na tua resposta, indica a ligação explicitamente: "A Maria tem competência em storage, demonstrada pela sua certificação Dell EMC e experiência em administração SAN no CV." Não te limites a listar resultados — interpreta-os.
-    e. Se search_certifications e search_experience devolveram resultados para o mesmo colaborador, consolida-os num único bloco por pessoa.
+    e. IMPORTANTE: search_experience devolve um campo "total_employees" e uma lista "employees". Deves listar TODOS os colaboradores dessa lista — não omitas nenhuma pessoa. Mesmo que alguém tenha uma pontuação de relevância mais baixa, pode ter experiência real. Todos os colaboradores devolvidos são relevantes.
+    f. Se search_certifications e search_experience devolveram resultados para o mesmo colaborador, consolida-os num único bloco por pessoa.
+    g. BREVIDADE EM PESQUISAS AMPLAS — para uma pergunta ampla do tipo "quem tem X", lista no máximo 2 certificações por colaborador e resume as restantes (ex: "...e mais 4 certificações VMware"). O objetivo é listar TODAS as pessoas, não detalhar exaustivamente cada uma. O utilizador pode pedir detalhes completos de qualquer pessoa depois.
 18. PARTILHA DE FICHEIROS DE CERTIFICADOS — quando o utilizador pedir para partilhar, ver ou transferir os ficheiros de certificados, cartas de verificação ou documentos de certificação de um colaborador (não o CV):
     - Chama get_employee_cert_files com o nome do colaborador.
     - Se found=true e single=true: responde com uma mensagem e inclui o URL devolvido como hiperligação.
@@ -981,17 +985,26 @@ def _tool_search_experience(
     scoped = [employee_name] if employee_name else []
     snippets = _search_semantic_chunks(query_vector, "experience", scoped)
 
-    return {
-        "experience_snippets": [
-            {
-                "employee_name": s.employee_name,
-                "source": s.source,
-                "relevance_score": round(s.score, 3),
-                "excerpt": s.text[:400],
+    # Group by employee so the LLM clearly sees how many distinct people were found
+    # and is not tempted to skip lower-ranked employees.
+    employees: dict[str, dict] = {}
+    for s in snippets:
+        name = s.employee_name
+        if name not in employees:
+            employees[name] = {
+                "employee_name": name,
+                "best_relevance_score": round(s.score, 3),
+                "excerpts": [],
             }
-            for s in snippets
-        ],
-        "total_found": len(snippets),
+        if len(employees[name]["excerpts"]) < 2:
+            employees[name]["excerpts"].append(s.text[:400])
+
+    employee_list = sorted(employees.values(), key=lambda x: x["best_relevance_score"], reverse=True)
+
+    return {
+        "employees": employee_list,
+        "total_employees": len(employee_list),
+        "total_found": len(employee_list),
     }
 
 
