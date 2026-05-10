@@ -134,20 +134,23 @@ class SharePointWatcher:
         if stored_delta:
             start_url = stored_delta
         else:
-            folder = settings.sharepoint_folder_path.strip("/")
-            if folder:
-                folder_id = await self._resolve_folder_id(headers, folder)
+            drive_id = settings.sharepoint_drive_id.strip()
+            drive_prefix = (
+                f"https://graph.microsoft.com/v1.0/drives/{drive_id}"
+                if drive_id
+                else "https://graph.microsoft.com/v1.0/me/drive"
+            )
+            folder_item_id = settings.sharepoint_folder_item_id.strip()
+            folder_path = settings.sharepoint_folder_path.strip("/")
+            if folder_item_id:
+                start_url = f"{drive_prefix}/items/{folder_item_id}/delta?{select}"
+            elif folder_path:
+                folder_id = await self._resolve_folder_id(headers, folder_path, drive_prefix)
                 if not folder_id:
                     return
-                start_url = (
-                    f"https://graph.microsoft.com/v1.0"
-                    f"/me/drive/items/{folder_id}/delta?{select}"
-                )
+                start_url = f"{drive_prefix}/items/{folder_id}/delta?{select}"
             else:
-                start_url = (
-                    f"https://graph.microsoft.com/v1.0"
-                    f"/me/drive/root/delta?{select}"
-                )
+                start_url = f"{drive_prefix}/root/delta?{select}"
 
         new_items: list[dict] = []
         next_url: str | None = start_url
@@ -189,12 +192,13 @@ class SharePointWatcher:
                 await self._process_item(http, token, item)
 
     async def _resolve_folder_id(
-        self, headers: dict[str, str], folder: str
+        self, headers: dict[str, str], folder: str,
+        drive_prefix: str = "https://graph.microsoft.com/v1.0/me/drive",
     ) -> str | None:
-        """Resolve a folder name/path to its OneDrive item ID.
+        """Resolve a folder name/path to its drive item ID.
 
         Tries three strategies in order:
-        1. Path-based lookup: /me/drive/root:/{folder}
+        1. Path-based lookup: {drive_prefix}/root:/{folder}
         2. Enumerate root children and match by name (case-insensitive)
         3. Enumerate root children recursively for nested paths
         Logs all root folder names when resolution fails.
@@ -202,7 +206,7 @@ class SharePointWatcher:
         # Strategy 1: direct path lookup
         async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as _http:
             resp = await _http.get(
-                f"https://graph.microsoft.com/v1.0/me/drive/root:/{folder}",
+                f"{drive_prefix}/root:/{folder}",
                 headers=headers,
                 params={"$select": "id,name"},
             )
@@ -215,14 +219,15 @@ class SharePointWatcher:
         # First check if the drive itself is accessible
         async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as _http:
             drive_resp = await _http.get(
-                "https://graph.microsoft.com/v1.0/me/drive",
+                drive_prefix,
                 headers=headers,
                 params={"$select": "id,driveType,owner"},
             )
         if drive_resp.status_code != 200:
             logger.error(
-                "SharePoint watcher: /me/drive not accessible — HTTP %s %s. "
+                "SharePoint watcher: drive not accessible (%s) — HTTP %s %s. "
                 "Ensure Files.Read (or Files.ReadWrite) is granted for the bot account.",
+                drive_prefix,
                 drive_resp.status_code,
                 drive_resp.text[:300],
             )
@@ -232,7 +237,7 @@ class SharePointWatcher:
 
         async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as _http:
             children_resp = await _http.get(
-                "https://graph.microsoft.com/v1.0/me/drive/root/children",
+                f"{drive_prefix}/root/children",
                 headers=headers,
                 params={"$select": "id,name,folder"},
             )
@@ -252,7 +257,7 @@ class SharePointWatcher:
                 if remaining:
                     async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as _http:
                         sub_resp = await _http.get(
-                            f"https://graph.microsoft.com/v1.0/me/drive/items/{item_id}:/{remaining}",
+                            f"{drive_prefix}/items/{item_id}:/{remaining}",
                             headers=headers,
                             params={"$select": "id,name"},
                         )
@@ -294,8 +299,14 @@ class SharePointWatcher:
             if download_url:
                 resp = await http.get(download_url)
             else:
+                drive_id = settings.sharepoint_drive_id.strip()
+                drive_prefix = (
+                    f"https://graph.microsoft.com/v1.0/drives/{drive_id}"
+                    if drive_id
+                    else "https://graph.microsoft.com/v1.0/me/drive"
+                )
                 resp = await http.get(
-                    f"https://graph.microsoft.com/v1.0/me/drive/items/{item_id}/content",
+                    f"{drive_prefix}/items/{item_id}/content",
                     headers={"Authorization": f"Bearer {token}"},
                 )
             if resp.status_code != 200:
