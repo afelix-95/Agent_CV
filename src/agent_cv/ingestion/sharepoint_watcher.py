@@ -1,33 +1,37 @@
 """OneDrive/SharePoint document library watcher.
 
-Polls the bot's own OneDrive folder for new or modified files using the
-Microsoft Graph delta API and ingests them automatically into the Agent CV
-database.
+Polls the bot's own OneDrive / SharePoint document library for new or modified
+files using the Microsoft Graph delta API and ingests them automatically into
+the Agent CV database.
 
-Because the bot owns the drive, no cross-tenant permissions are required —
-only the basic ``Files.Read`` delegated scope (self-consentable) is needed.
+Two complementary mechanisms are used:
+  1. Graph change notifications (push) — a subscription on the drive/folder
+     delivers a notification within seconds of a file being uploaded or changed.
+     The notification handler calls _tick() immediately so ingestion is near-
+     instant.  Subscriptions expire after 72 hours (drives, delegated auth)
+     and are renewed automatically every 70 hours.
+  2. Periodic delta poll (fallback) — runs every SHAREPOINT_POLL_INTERVAL
+     seconds (default 3600) to catch any files that slipped through missed
+     notifications (e.g. while the app was offline).
 
 The delta link (a resumption token) is persisted in the ``sync_state`` table
-so restarts continue from where the previous run left off rather than
-re-scanning the entire library.
+so restarts continue from where the previous run left off.
 
 Configuration (all in .env / Settings):
-    SHAREPOINT_FOLDER_PATH    — Subfolder path inside the bot's OneDrive root
-                                (e.g. "REPOCV").  Leave blank to watch the
-                                entire OneDrive root.
-    SHAREPOINT_POLL_INTERVAL  — Seconds between delta polls (default 3600).
-
-Cross-tenant sharing link support (fallback):
-    SHAREPOINT_URL            — If set, children are listed via the Graph
-                                Shares API instead of delta.  Requires an
-                                "Anyone with the link" sharing URL and
-                                ``Files.Read.All`` admin-consented.
+    SHAREPOINT_DRIVE_ID       — Drive ID of the SharePoint library.
+    SHAREPOINT_FOLDER_PATH    — Subfolder path within the drive root (optional).
+    SHAREPOINT_FOLDER_ITEM_ID — Specific folder item ID (optional, faster).
+    SHAREPOINT_POLL_INTERVAL  — Seconds between fallback delta polls (default 3600).
+    WEBHOOK_BASE_URL          — Public base URL; notifications go to
+                                {WEBHOOK_BASE_URL}/graph-notifications/sharepoint
+    WEBHOOK_SECRET            — Shared secret for clientState validation.
 """
 from __future__ import annotations
 
 import asyncio
 import base64
 import logging
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.parse import urlparse, urlunparse
@@ -46,6 +50,10 @@ logger = logging.getLogger(__name__)
 
 _SYNC_KEY = "sharepoint_delta_link"
 _SUPPORTED = {".pdf", ".txt", ".docx"}
+
+# Graph drive subscriptions (delegated auth) can be up to 4320 minutes = 72 hours.
+_SUBSCRIPTION_LIFETIME_S: int = 72 * 3600
+_SUBSCRIPTION_RENEW_BEFORE_S: int = 2 * 3600
 
 
 def _encode_sharing_url(url: str) -> str:
@@ -72,15 +80,20 @@ def sharepoint_configured() -> bool:
 
 
 class SharePointWatcher:
-    """Async background task that watches the bot's OneDrive for new files
-    and ingests them via the existing pipeline.
+    """Async background task that watches a SharePoint document library for new
+    files and ingests them via the existing pipeline.
 
-    Lifecycle is managed by the FastAPI lifespan in main.py.
+    Uses Graph change notifications for near-instant detection, with a periodic
+    delta poll as a fallback.  Lifecycle is managed by the FastAPI lifespan.
     """
 
     def __init__(self, poll_interval: int = 3600) -> None:
         self._poll_interval = poll_interval
         self._task: asyncio.Task | None = None
+        self._subscription_task: asyncio.Task | None = None
+        self._subscription_id: str | None = None
+        # Set by notify() when Graph pushes a change notification
+        self._notify_event: asyncio.Event = asyncio.Event()
 
     # ------------------------------------------------------------------ #
     # Lifecycle                                                            #
@@ -91,25 +104,35 @@ class SharePointWatcher:
             self._task = asyncio.create_task(
                 self._poll_loop(), name="sharepoint-watcher"
             )
-            folder = settings.sharepoint_folder_path or "/"
-            logger.info(
-                "SharePoint watcher started (interval=%ds, folder=%r)",
-                self._poll_interval,
-                folder,
+        if self._subscription_task is None or self._subscription_task.done():
+            self._subscription_task = asyncio.create_task(
+                self._subscription_lifecycle(), name="sharepoint-subscription"
             )
+        folder = settings.sharepoint_folder_path or "/"
+        logger.info(
+            "SharePoint watcher started (interval=%ds, folder=%r)",
+            self._poll_interval,
+            folder,
+        )
 
     async def stop(self) -> None:
-        if self._task and not self._task.done():
-            self._task.cancel()
-            try:
-                await self._task
-            except asyncio.CancelledError:
-                pass
-            logger.info("SharePoint watcher stopped")
+        for task in (self._task, self._subscription_task):
+            if task and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+        await self._delete_subscription()
+        logger.info("SharePoint watcher stopped")
 
     @property
     def running(self) -> bool:
         return self._task is not None and not self._task.done()
+
+    def notify(self) -> None:
+        """Signal the watcher that a Graph change notification has arrived."""
+        self._notify_event.set()
 
     # ------------------------------------------------------------------ #
     # Polling loop                                                         #
@@ -123,7 +146,189 @@ class SharePointWatcher:
                 raise
             except Exception:
                 logger.exception("SharePoint watcher: unhandled error in tick")
-            await asyncio.sleep(self._poll_interval)
+            # Wake on push notification OR fall back to the poll interval
+            try:
+                await asyncio.wait_for(
+                    self._notify_event.wait(),
+                    timeout=self._poll_interval,
+                )
+                logger.debug("SharePoint watcher: woken by Graph change notification")
+            except asyncio.TimeoutError:
+                pass
+            finally:
+                self._notify_event.clear()
+
+    # ------------------------------------------------------------------ #
+    # Graph change notification subscription                              #
+    # ------------------------------------------------------------------ #
+
+    async def _subscription_lifecycle(self) -> None:
+        """Create the subscription after server is ready, then renew periodically."""
+        await asyncio.sleep(5)  # wait for uvicorn to start serving
+        await self._cleanup_stale_subscriptions()
+
+        renew_interval = _SUBSCRIPTION_LIFETIME_S - _SUBSCRIPTION_RENEW_BEFORE_S
+        for attempt in range(1, 6):
+            try:
+                await self._create_or_renew_subscription()
+                break
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                if attempt == 5:
+                    logger.exception(
+                        "SharePoint watcher: failed to create subscription after %d attempts — "
+                        "falling back to poll-only mode", attempt,
+                    )
+                    return
+                wait = attempt * 10
+                logger.warning(
+                    "SharePoint watcher: subscription attempt %d failed, retrying in %ds",
+                    attempt, wait,
+                )
+                await asyncio.sleep(wait)
+
+        while True:
+            await asyncio.sleep(renew_interval)
+            for attempt in range(1, 6):
+                try:
+                    await self._create_or_renew_subscription()
+                    break
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    if attempt == 5:
+                        logger.exception(
+                            "SharePoint watcher: subscription renewal failed after %d attempts", attempt,
+                        )
+                    else:
+                        wait = attempt * 15
+                        logger.warning(
+                            "SharePoint watcher: renewal attempt %d failed, retrying in %ds",
+                            attempt, wait,
+                        )
+                        await asyncio.sleep(wait)
+
+    def _notification_url(self) -> str:
+        base = (settings.webhook_base_url or "").rstrip("/")
+        return f"{base}/graph-notifications/sharepoint"
+
+    def _subscription_resource(self) -> str:
+        drive_id = settings.sharepoint_drive_id.strip()
+        drive_prefix = f"drives/{drive_id}" if drive_id else "me/drive"
+        folder_item_id = settings.sharepoint_folder_item_id.strip()
+        if folder_item_id and drive_id:
+            return f"/drives/{drive_id}/items/{folder_item_id}"
+        return f"/{drive_prefix}/root"
+
+    async def _create_or_renew_subscription(self) -> None:
+        if not settings.webhook_base_url:
+            logger.debug(
+                "SharePoint watcher: WEBHOOK_BASE_URL not set — skipping subscription creation"
+            )
+            return
+
+        expiry = datetime.now(timezone.utc) + timedelta(seconds=_SUBSCRIPTION_LIFETIME_S)
+        expiry_str = expiry.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        token = await asyncio.to_thread(get_access_token)
+
+        async with httpx.AsyncClient(timeout=15.0) as http:
+            if self._subscription_id:
+                resp = await http.patch(
+                    f"https://graph.microsoft.com/v1.0/subscriptions/{self._subscription_id}",
+                    headers={
+                        "Authorization": f"Bearer {token}",
+                        "Content-Type": "application/json",
+                    },
+                    json={"expirationDateTime": expiry_str},
+                )
+                if resp.status_code == 200:
+                    logger.info(
+                        "SharePoint watcher: subscription %s renewed until %s",
+                        self._subscription_id, expiry_str,
+                    )
+                    return
+                logger.warning(
+                    "SharePoint watcher: subscription renew returned HTTP %s — will recreate",
+                    resp.status_code,
+                )
+                self._subscription_id = None
+
+            resp = await http.post(
+                "https://graph.microsoft.com/v1.0/subscriptions",
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "changeType": "updated,deleted",
+                    "notificationUrl": self._notification_url(),
+                    "resource": self._subscription_resource(),
+                    "expirationDateTime": expiry_str,
+                    "clientState": settings.webhook_secret,
+                },
+            )
+
+        if resp.status_code == 201:
+            self._subscription_id = resp.json()["id"]
+            logger.info(
+                "SharePoint watcher: created subscription %s (resource=%s, expires %s)",
+                self._subscription_id, self._subscription_resource(), expiry_str,
+            )
+        else:
+            raise RuntimeError(
+                f"SharePoint watcher: failed to create subscription — "
+                f"HTTP {resp.status_code}: {resp.text[:300]}"
+            )
+
+    async def _delete_subscription(self) -> None:
+        if not self._subscription_id:
+            return
+        try:
+            token = await asyncio.to_thread(get_access_token)
+            async with httpx.AsyncClient(timeout=10.0) as http:
+                resp = await http.delete(
+                    f"https://graph.microsoft.com/v1.0/subscriptions/{self._subscription_id}",
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+            if resp.status_code in (200, 204):
+                logger.info(
+                    "SharePoint watcher: deleted subscription %s", self._subscription_id
+                )
+            self._subscription_id = None
+        except Exception:
+            logger.exception("SharePoint watcher: error deleting subscription on shutdown")
+
+    async def _cleanup_stale_subscriptions(self) -> None:
+        """Delete any existing subscriptions pointing at our notification URL."""
+        if not settings.webhook_base_url:
+            return
+        try:
+            token = await asyncio.to_thread(get_access_token)
+            async with httpx.AsyncClient(timeout=15.0) as http:
+                resp = await http.get(
+                    "https://graph.microsoft.com/v1.0/subscriptions",
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+                if resp.status_code != 200:
+                    return
+                our_url = self._notification_url().rstrip("/")
+                stale = [
+                    s["id"]
+                    for s in resp.json().get("value", [])
+                    if s.get("notificationUrl", "").rstrip("/") == our_url
+                ]
+                for sub_id in stale:
+                    del_resp = await http.delete(
+                        f"https://graph.microsoft.com/v1.0/subscriptions/{sub_id}",
+                        headers={"Authorization": f"Bearer {token}"},
+                    )
+                    if del_resp.status_code in (200, 204):
+                        logger.info(
+                            "SharePoint watcher: deleted stale subscription %s", sub_id
+                        )
+        except Exception:
+            logger.exception("SharePoint watcher: error during stale subscription cleanup")
 
     async def _tick(self) -> None:
         token = await asyncio.to_thread(get_access_token)

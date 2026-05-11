@@ -16,6 +16,7 @@ from agent_cv.api.models import (
 )
 from agent_cv.db.schema import apply_schema
 from agent_cv.ingestion.ingest_service import ingest_documents
+from agent_cv.ingestion.sharepoint_watcher import get_sharepoint_watcher, sharepoint_configured
 from agent_cv.db.connection import get_connection
 from agent_cv.services.query_service import audit_query
 from agent_cv.services.agent_service import handle_user_query
@@ -231,6 +232,49 @@ async def teams_chats_webhook(
             continue
         client_state = notification.get("clientState", "")
         asyncio.create_task(bot.handle_chat_notification(resource, client_state))
+
+    return Response(status_code=202)
+
+
+@router.post("/graph-notifications/sharepoint")
+async def sharepoint_webhook(
+    request: Request,
+    validationToken: str | None = Query(default=None),
+) -> Response:
+    """Webhook for SharePoint drive subscription — fires when files are added or changed."""
+    import logging as _logging
+    _wh_log = _logging.getLogger("agent_cv.webhook")
+
+    # Graph subscription validation handshake: echo the token back as text/plain
+    if validationToken:
+        _wh_log.info("SharePoint webhook: Graph validation handshake received")
+        return PlainTextResponse(validationToken, status_code=200)
+
+    raw_body = await request.body()
+    try:
+        body = await request.json()
+    except Exception:
+        _wh_log.warning("SharePoint webhook: failed to parse JSON body: %s", raw_body[:500])
+        return Response(status_code=400)
+
+    notifications = body.get("value", [])
+    _wh_log.info("SharePoint webhook: received %d notification(s)", len(notifications))
+
+    valid = False
+    for notification in notifications:
+        client_state = notification.get("clientState", "")
+        if not hmac.compare_digest(client_state, settings.webhook_secret):
+            _wh_log.warning("SharePoint webhook: clientState mismatch — ignoring notification")
+            continue
+        _wh_log.debug(
+            "SharePoint webhook: change on resource=%s changeType=%s",
+            notification.get("resource", ""),
+            notification.get("changeType", ""),
+        )
+        valid = True
+
+    if valid and sharepoint_configured():
+        get_sharepoint_watcher().notify()
 
     return Response(status_code=202)
 
