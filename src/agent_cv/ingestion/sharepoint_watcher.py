@@ -261,7 +261,7 @@ class SharePointWatcher:
                     "Content-Type": "application/json",
                 },
                 json={
-                    "changeType": "updated,deleted",
+                    "changeType": "updated",
                     "notificationUrl": self._notification_url(),
                     "resource": self._subscription_resource(),
                     "expirationDateTime": expiry_str,
