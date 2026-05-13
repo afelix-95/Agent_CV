@@ -1,16 +1,68 @@
 import asyncio
+import base64
+import json
+import logging
 import os
 import re
+import time
 
 import httpx
 from microsoft_teams.api import MessageActivity, TypingActivityInput
 from microsoft_teams.apps import ActivityContext, App
 from microsoft_teams.devtools import DevToolsPlugin
 
-app = App(plugins=[DevToolsPlugin()])
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger(__name__)
+
+_client_id = os.getenv("BOT_APP_ID")
+_client_secret = os.getenv("BOT_APP_PASSWORD")
+# skip_auth=True bypasses inbound Bot Framework token validation.
+# For DevTools local testing we also skip outbound token acquisition (MSAL)
+# by supplying a dummy token callable instead of the client_secret — this avoids
+# unauthorized_client errors when no Azure Bot resource backs the app registration.
+# Set BOT_SKIP_AUTH=false in production once an Azure Bot resource is configured.
+_skip_auth = os.getenv("BOT_SKIP_AUTH", "true").lower() not in ("false", "0", "no")
+
+
+def _make_fake_jwt() -> str:
+    """Return a syntactically-valid (but unsigned) JWT for DevTools-only mode.
+    Signature verification is disabled by the SDK when skip_auth=True, so only
+    the structure needs to be correct to satisfy JsonWebToken construction."""
+    def _b64url(data: dict) -> str:
+        return base64.urlsafe_b64encode(
+            json.dumps(data, separators=(",", ":")).encode()
+        ).rstrip(b"=").decode()
+
+    header = _b64url({"alg": "RS256", "typ": "JWT"})
+    payload = _b64url({"exp": int(time.time()) + 3600})
+    return f"{header}.{payload}.AAAA"
+
+
+async def _devtools_token(scopes, tenant_id=None) -> str:
+    """Dummy token provider for DevTools-only mode (no Azure Bot resource required)."""
+    return _make_fake_jwt()
+
+
+app = App(
+    client_id=_client_id,
+    tenant_id=os.getenv("BOT_TENANT_ID"),
+    # In skip-auth mode: use dummy token callable to bypass MSAL outbound auth.
+    # In production: use client_secret so MSAL acquires a real Bot Framework token.
+    **({"token": _devtools_token} if _skip_auth else {"client_secret": _client_secret}),
+    skip_auth=_skip_auth,
+    plugins=[DevToolsPlugin()],
+)
 
 BACKEND_QUERY_URL = os.getenv("BACKEND_QUERY_URL", "http://localhost:8000/query")
 BACKEND_TIMEOUT_SECONDS = float(os.getenv("BACKEND_TIMEOUT_SECONDS", "20"))
+# Set BACKEND_SSL_VERIFY=false to disable TLS verification (corporate proxy with self-signed CA).
+# Set BACKEND_SSL_VERIFY to a path to trust a specific CA bundle file.
+_ssl_verify_env = os.getenv("BACKEND_SSL_VERIFY", "true")
+BACKEND_SSL_VERIFY: bool | str = (
+    False if _ssl_verify_env.lower() in ("false", "0", "no")
+    else True if _ssl_verify_env.lower() in ("true", "1", "yes")
+    else _ssl_verify_env  # treat as CA bundle path
+)
 
 
 async def _query_backend(query_text: str, conversation_id: str | None) -> tuple[str | None, str | None]:
@@ -19,7 +71,7 @@ async def _query_backend(query_text: str, conversation_id: str | None) -> tuple[
         "conversation_id": conversation_id,
     }
     try:
-        async with httpx.AsyncClient(timeout=BACKEND_TIMEOUT_SECONDS) as client:
+        async with httpx.AsyncClient(timeout=BACKEND_TIMEOUT_SECONDS, follow_redirects=True, verify=BACKEND_SSL_VERIFY) as client:
             response = await client.post(BACKEND_QUERY_URL, json=payload)
             response.raise_for_status()
             body = response.json()
@@ -62,6 +114,17 @@ async def _query_backend(query_text: str, conversation_id: str | None) -> tuple[
     return "\n".join(lines), None
 
 
+@app.on_install_add
+async def handle_install(ctx: ActivityContext) -> None:
+    """Acknowledge bot installation — required for Teams to complete the install flow."""
+    pass
+
+
+@app.event("error")
+async def handle_error(event) -> None:
+    logger.exception("Unhandled error processing activity: %s", event.error, exc_info=event.error)
+
+
 @app.on_message_pattern(re.compile(r"^\s*(hello|hi|greetings|ola|oi)\b", re.IGNORECASE))
 async def handle_greeting(ctx: ActivityContext[MessageActivity]) -> None:
     """Handle greeting messages."""
@@ -74,7 +137,10 @@ async def handle_greeting(ctx: ActivityContext[MessageActivity]) -> None:
 @app.on_message
 async def handle_message(ctx: ActivityContext[MessageActivity]):
     """Forward user queries to the Agent CV backend and return real results."""
-    await ctx.reply(TypingActivityInput())
+    try:
+        await ctx.reply(TypingActivityInput())
+    except Exception:
+        logger.debug("Could not send typing indicator", exc_info=True)
     user_text = (ctx.activity.text or "").strip()
     if not user_text:
         await ctx.send("Please enter a query.")

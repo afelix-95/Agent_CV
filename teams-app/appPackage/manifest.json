@@ -4,19 +4,19 @@
   "manifestVersion": "1.25",
   "id": "${{TEAMS_APP_ID}}",
   "name": {
-    "short": "agent-cv-devtools-${{APP_NAME_SUFFIX}}",
-    "full": "Agent Cv Devtools"
+    "short": "Agent CV",
+    "full": "Agent CV — Certification Assistant"
   },
   "developer": {
-    "name": "Microsoft",
+    "name": "${{DEVELOPER_NAME}}",
     "mpnId": "",
     "websiteUrl": "https://microsoft.com",
     "privacyUrl": "https://privacy.microsoft.com/privacystatement",
     "termsOfUseUrl": "https://www.microsoft.com/legal/terms-of-use"
   },
   "description": {
-    "short": "Sample Python bot that repeats back what you say",
-    "full": "Sample Python bot that repeats back what you say"
+    "short": "Search and explore team certifications and CVs.",
+    "full": "Agent CV is a conversational AI assistant that lets you search, explore, and export certifications and professional profiles across your organisation. Ask questions like 'Who has Red Hat certifications?' or 'Show me expired AWS certs'."
   },
   "icons": {
     "outline": "outline.png",
@@ -35,7 +35,7 @@
   ],
   "bots": [
     {
-      "botId": "${{BOT_ID}}",
+      "botId": "${{BOT_APP_ID}}",
       "scopes": ["personal", "team", "groupChat"],
       "isNotificationOnly": false,
       "supportsCalling": false,
@@ -48,8 +48,8 @@
     "*.botframework.com"
   ],
   "webApplicationInfo": {
-    "id": "${{BOT_ID}}",
-    "resource": "api://botid-${{BOT_ID}}"
+    "id": "${{BOT_APP_ID}}",
+    "resource": "api://botid-${{BOT_APP_ID}}"
   },
   "supportsChannelFeatures": "tier1"
 }
