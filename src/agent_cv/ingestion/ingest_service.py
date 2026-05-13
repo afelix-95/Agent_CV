@@ -14,6 +14,7 @@ from agent_cv.db.connection import get_connection
 from agent_cv.ingestion.embedding_service import chunk_text, embed_texts
 from agent_cv.ingestion.filename_parser import parse_file_name
 from agent_cv.ingestion.language_detection_service import detect_language
+from agent_cv.ingestion.vendor_discovery_service import discover_vendor
 from agent_cv.ingestion.vision_extraction_service import (
     detect_is_transcript,
     extract_all_certificates_from_pdf,
@@ -197,6 +198,40 @@ def _ingest_one_file(
         return False
 
     parsed = parse_file_name(logical_path)
+
+    # --- Auto-discover vendor when the filename parser found no match ---
+    # Only run for non-CV documents (CVs have no vendor concept).
+    if not parsed.is_cv and parsed.vendor is None:
+        # Step A: check vendors already stored in the DB (covers previously
+        # discovered vendors so we never pay for a second LLM call).
+        cur.execute(
+            """
+            SELECT vendor_name
+              FROM vendors
+             WHERE lower(%s) LIKE '%%' || lower(vendor_name) || '%%'
+             LIMIT 1
+            """,
+            (parsed.title,),
+        )
+        db_vendor_row = cur.fetchone()
+        if db_vendor_row:
+            parsed.vendor = db_vendor_row["vendor_name"]
+            logger.debug(
+                "vendor_discovery: resolved %r from DB for cert %r",
+                parsed.vendor,
+                parsed.title,
+            )
+        else:
+            # Step B: fall back to LLM lookup.
+            discovered = discover_vendor(parsed.title)
+            if discovered:
+                parsed.vendor = discovered
+                logger.info(
+                    "vendor_discovery: LLM identified vendor %r for cert %r",
+                    parsed.vendor,
+                    parsed.title,
+                )
+
     text = _extract_text(actual_path)
     detected_language = detect_language(text)
 
