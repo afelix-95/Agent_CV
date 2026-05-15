@@ -368,7 +368,7 @@ HOW TO RESPOND:
     - Do NOT include certs where inferred_expiry_date is null (these never expire)
     - Do NOT include certs where inferred_expiry_date is 'unknown' (expiry cannot be determined)
     - Do NOT include certs where inferred_expiry_date is a future date (these are "soon to expire", not expired — include them only if the user explicitly asks for expiring/soon-to-expire certs)
-13. Certification results include an "inferred_expiry_date" field for records where the expiry date was not registered. If this field is a date (not null or "unknown"), use it as an estimated expiry and clearly label it as "estimated" or "inferred" in your answer. If it is null, the cert does not expire. If it is "unknown", you cannot infer an expiry date for that record.
+13. Certification results include an "inferred_expiry_date" field for records where the expiry date was not registered. If this field is a date (not null or "unknown"), use it as an estimated expiry and clearly label it as "estimated" or "inferred" in your answer. If it is null, the cert does not expire. If it is "unknown", call search_web with a query like "[cert name] [vendor] certification validity period how long" to look up the typical expiry for that certification, then apply the result as an estimated expiry and label it clearly as "estimated (web)" in your answer. If the web search also returns no clear validity period, state that the expiry date could not be determined.
 14. PAGINATION — search_certifications returns 15 results per page. When has_more=true in the result, tell the user how many results remain and offer to show more. When the user asks to see more results (e.g. "show more", "next", "ver mais"), call search_certifications again with the same query/status and offset=next_offset from the previous result.
 15. BULK EXPORTS — when the user asks to export, download, or compile all certifications into a table or file:
     - For certification data: call export_certifications_csv ONCE with the appropriate filters (e.g. expired_only=true for expired certs). Do NOT paginate search_certifications to collect data for an export.
@@ -392,6 +392,14 @@ HOW TO RESPOND:
     - If found=true and single=false: reply explaining there are multiple files and include the zip download URL as a hyperlink.
     - If found=false but sharepoint_urls is present: reply with the direct SharePoint URLs instead.
     - If found=false with no fallback: inform the user that no certificate files were found for that employee.
+19. EMPLOYEE ROSTER QUERIES — when the user asks about org structure, teams, managers, or which employees are missing a CV:
+    - Call query_employee_roster with the appropriate filter(s).
+    - For "missing CV" questions, use missing_cv_only=true. For "employees under manager X", use manager_name=X. For teams, use team=Y.
+    - The roster uses the 'LASTNAME Firstname' format for manager_name. Accept any order from the user (e.g. "Hugo Ribeiro" or "Ribeiro Hugo") — the tool automatically tries both orderings.
+    - Each employee row already contains the 'team' field. If a follow-up question asks for the team of employees already retrieved in the same conversation, re-call query_employee_roster with the same filters — the team is included in the response.
+    - Present employees in a clear format. If missing_cv_only=true, indicate these people have no CV in the system yet and suggest sending CVs.
+    - For large lists, summarise by team or manager when useful.
+    - If the user asks for a CSV or export of the list, call query_employee_roster again with export_as_csv=true (keep the other filters) and share the returned link.
 """
 
 _SYSTEM_PROMPT_PT = """\
@@ -437,7 +445,7 @@ COMO RESPONDER:
     - NÃO incluas certificações com inferred_expiry_date nulo (estas não expiram)
     - NÃO incluas certificações com inferred_expiry_date igual a 'unknown' (não é possível determinar a validade)
     - NÃO incluas certificações com inferred_expiry_date no futuro (estas estão "a vencer em breve", não vencidas — inclui-as apenas se o utilizador pedir explicitamente certificações a vencer)
-13. Os resultados de certificações incluem um campo "inferred_expiry_date" para registos em que a data de validade não foi registada. Se este campo contiver uma data (não nulo nem "unknown"), usa-a como validade estimada e indica claramente que é uma estimativa na tua resposta. Se for nulo, a certificação não expira. Se for "unknown", não é possível inferir a data de validade desse registo.
+13. Os resultados de certificações incluem um campo "inferred_expiry_date" para registos em que a data de validade não foi registada. Se este campo contiver uma data (não nulo nem "unknown"), usa-a como validade estimada e indica claramente que é uma estimativa na tua resposta. Se for nulo, a certificação não expira. Se for "unknown", usa search_web com uma pesquisa do tipo "[nome da certificação] [fornecedor] certification validity period how long" para descobrir o período de validade típico dessa certificação, depois aplica o resultado como validade estimada e indica claramente "estimada (web)" na tua resposta. Se a pesquisa web também não devolver um período de validade claro, indica que não foi possível determinar a data de validade.
 14. PAGINAÇÃO — search_certifications devolve 15 resultados por página. Quando has_more=true no resultado, informa o utilizador de quantos resultados restam e oferece mostrar mais. Quando o utilizador pedir para ver mais resultados (ex: "mostrar mais", "ver mais", "próximos"), chama search_certifications novamente com o mesmo query/status e offset=next_offset do resultado anterior.
 15. EXPORTAÇÕES — quando o utilizador pedir para exportar, descarregar ou compilar certificações numa tabela ou ficheiro:
     - Para dados de certificações: chama export_certifications_csv UMA VEZ com os filtros adequados (ex: expired_only=true para vencidas). NÃO uses paginação com search_certifications para recolher dados para uma exportação.
@@ -464,7 +472,8 @@ COMO RESPONDER:
 19. CONSULTAS AO ROSTER DE COLABORADORES — quando o utilizador perguntar sobre estrutura organizacional, equipas, gestores ou quais colaboradores ainda não têm CV:
     - Chama query_employee_roster com o(s) filtro(s) adequado(s).
     - Para perguntas sobre "CV em falta", usa missing_cv_only=true. Para "colaboradores do gestor X", usa manager_name=X. Para equipas, usa team=Y.
-    - O roster usa o formato 'APELIDO Nome' para o campo manager_name. Aceita qualquer ordem do utilizador e passa como está; a ferramenta usa correspondência parcial.
+    - O roster usa o formato 'APELIDO Nome' para o campo manager_name. Aceita qualquer ordem do utilizador (ex: "Hugo Ribeiro" ou "Ribeiro Hugo") — a ferramenta tenta automaticamente as duas ordens.
+    - Cada linha de colaborador já inclui o campo 'team' (equipa). Se uma pergunta de seguimento pede a equipa de colaboradores já obtidos na mesma conversa, volta a chamar query_employee_roster com os mesmos filtros — a equipa já vem incluída na resposta.
     - Apresenta os colaboradores num formato claro. Se missing_cv_only=true, indica que estas pessoas ainda não têm CV no sistema e sugere o envio dos CVs.
     - Para listas grandes, resume por equipa ou gestor quando útil.
     - Se o utilizador pedir um CSV ou exportação da lista, chama query_employee_roster novamente com export_as_csv=true (mantém os restantes filtros) e partilha o link devolvido.
@@ -669,11 +678,15 @@ def handle_user_query(
                 args = {}
             logger.debug("Agent: calling tool %s with args %s", tool_call.function.name, args)
             result = _dispatch_tool(tool_call.function.name, args)
-            result_count = (
-                result.get("total_found", len(result.get("results", [])))
-                if isinstance(result, dict)
-                else 0
-            )
+            result_count = 0
+            if isinstance(result, dict):
+                result_count = (
+                    result.get("total_found")
+                    or result.get("total")
+                    or len(result.get("employees", result.get("results", [])))
+                    or result.get("row_count", 0)
+                    or 0
+                )
             logger.debug(
                 "Agent: tool %s returned %d results", tool_call.function.name, result_count
             )
@@ -1530,8 +1543,18 @@ def _tool_query_employee_roster(
     params: list[Any] = []
 
     if manager_name:
-        where_parts.append("o.manager_name ilike %s")
-        params.append(f"%{manager_name}%")
+        # manager_name is stored as "LASTNAME Firstname" in OWV.
+        # Accept either order from the LLM by trying both the value as-is
+        # and the two-word reversal, so "Hugo Ribeiro" also matches "RIBEIRO Hugo".
+        name_parts = manager_name.strip().split()
+        if len(name_parts) == 2:
+            a, b = name_parts
+            where_parts.append("(o.manager_name ilike %s or o.manager_name ilike %s)")
+            params.append(f"%{manager_name}%")  # e.g. "%Hugo Ribeiro%"
+            params.append(f"%{b} {a}%")         # e.g. "%Ribeiro Hugo%"
+        else:
+            where_parts.append("o.manager_name ilike %s")
+            params.append(f"%{manager_name}%")
 
     if team:
         where_parts.append("o.team ilike %s")
