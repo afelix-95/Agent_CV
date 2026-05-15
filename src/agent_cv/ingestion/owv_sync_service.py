@@ -170,18 +170,19 @@ class OWVSyncService:
                     )
                     upserted += 1
 
-                # Soft-delete employees no longer returned by the API
+                # Soft-delete employees no longer returned by the API.
+                # Use != ALL(%s) instead of NOT IN (%s) — psycopg3 handles
+                # list parameters correctly with the ANY/ALL array operators.
                 if received_ids:
                     cur.execute(
                         """
                         update owv_employees
                         set active   = false,
                             date_end = current_date
-                        where owv_id  not in %(ids)s
+                        where owv_id != ALL(%(ids)s)
                           and active  = true
-                        returning owv_id
                         """,
-                        {"ids": tuple(received_ids)},
+                        {"ids": received_ids},
                     )
                     deactivated = cur.rowcount if cur.rowcount >= 0 else 0
 
