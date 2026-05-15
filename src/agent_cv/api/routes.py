@@ -17,6 +17,8 @@ from agent_cv.api.models import (
 from agent_cv.db.schema import apply_schema
 from agent_cv.ingestion.ingest_service import ingest_documents
 from agent_cv.ingestion.sharepoint_watcher import get_sharepoint_watcher, sharepoint_configured
+from agent_cv.ingestion.owv_sync_service import get_owv_sync_service
+from agent_cv.config import owv_configured
 from agent_cv.db.connection import get_connection
 from agent_cv.services.query_service import audit_query
 from agent_cv.services.agent_service import handle_user_query
@@ -277,6 +279,20 @@ async def sharepoint_webhook(
         get_sharepoint_watcher().notify()
 
     return Response(status_code=202)
+
+
+# ------------------------------------------------------------------ #
+# OWV roster manual sync trigger                                      #
+# ------------------------------------------------------------------ #
+
+
+@router.post("/admin/owv-sync/trigger")
+async def owv_sync_trigger() -> dict:
+    """Manually trigger an OWV roster sync and return the result counts."""
+    if not owv_configured():
+        raise HTTPException(status_code=503, detail="OWV sync is not configured (missing OWV_USERNAME or OWV_PAT)")
+    result = await get_owv_sync_service().tick()
+    return {"upserted": result.upserted, "deactivated": result.deactivated}
 
 
 # ------------------------------------------------------------------ #

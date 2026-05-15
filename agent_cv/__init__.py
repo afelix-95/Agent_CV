@@ -9,3 +9,10 @@ if not _SRC_PACKAGE_DIR.is_dir():
     raise ModuleNotFoundError(f"Expected package directory not found: {_SRC_PACKAGE_DIR}")
 
 __path__ = [str(_SRC_PACKAGE_DIR)]
+
+from importlib.metadata import PackageNotFoundError, version
+
+try:
+    __version__ = version("agent-cv")
+except PackageNotFoundError:
+    __version__ = "dev"

@@ -245,6 +245,50 @@ TOOLS: list[dict] = [
     {
         "type": "function",
         "function": {
+            "name": "query_employee_roster",
+            "description": (
+                "Query the OWV employee roster for organisational information. "
+                "Use this for questions like: 'Who are the employees under manager X?', "
+                "'Who works in team Y?', 'Which employees are missing a CV?', "
+                "or 'Show me all active employees'. "
+                "This data comes from the HR system (not from ingested CVs). "
+                "Employee names in the roster use the format 'LASTNAME Firstname' for "
+                "the short 'name' field and manager_name field."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "manager_name": {
+                        "type": "string",
+                        "description": (
+                            "Filter by manager name (partial match, case-insensitive). "
+                            "Names are stored as 'LASTNAME Firstname' (e.g. 'GOMES Bruno') "
+                            "but you may pass either format."
+                        ),
+                    },
+                    "team": {
+                        "type": "string",
+                        "description": "Filter by team name (partial match, case-insensitive).",
+                    },
+                    "active_only": {
+                        "type": "boolean",
+                        "description": "Return only currently active employees. Default: true.",
+                    },
+                    "missing_cv_only": {
+                        "type": "boolean",
+                        "description": (
+                            "If true, return only employees who have no CV ingested in the system. "
+                            "Use for questions like 'whose CV is missing?'."
+                        ),
+                    },
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "translate_cv_to_pdf",
             "description": (
                 "Translate an employee's CV into a target language and generate a downloadable PDF "
@@ -289,6 +333,7 @@ TOOLS AVAILABLE:
 • export_certifications_csv — export certifications to a downloadable CSV file; handles all filtering server-side in ONE call (use for any certification export/bulk request)
 • create_csv_report — export non-certification lists (e.g. employee lists) as a downloadable CSV file
 • translate_cv_to_pdf — translate an employee's CV into a target language and generate a Europass-format PDF; returns a signed download URL
+• query_employee_roster — query the HR employee roster (OWV system) for organisational info: employees under a manager, employees by team, or employees missing a CV. Use for any question about org structure, headcount, or CV coverage.
 
 HOW TO RESPOND:
 1. For any data query, use tools FIRST — never answer from memory or make assumptions
@@ -357,6 +402,7 @@ FERRAMENTAS DISPONÍVEIS:
 • export_certifications_csv — exportar certificações para um ficheiro CSV descarregável; trata toda a filtragem no servidor numa ÚNICA chamada (usar para qualquer exportação de certificações)
 • create_csv_report — exportar listas não relacionadas com certificações (ex: lista de colaboradores) como ficheiro CSV descarregável
 • translate_cv_to_pdf — traduzir o CV de um colaborador para outro idioma e gerar um PDF no formato Europass; devolve um URL de transferência assinado
+• query_employee_roster — consultar o roster de colaboradores do sistema de RH (OWV): colaboradores sob um gestor, por equipa, ou colaboradores sem CV no sistema. Usar para perguntas sobre estrutura organizacional, contagem de pessoas, ou cobertura de CVs.
 
 COMO RESPONDER:
 1. Para qualquer pergunta sobre dados, usa as ferramentas PRIMEIRO — nunca adivinhes
@@ -407,6 +453,12 @@ COMO RESPONDER:
     - Se found=true e single=false: responde explicando que existem vários ficheiros e inclui o URL do zip como hiperligação.
     - Se found=false mas sharepoint_urls estiver presente: responde com os URLs diretos do SharePoint.
     - Se found=false sem alternativa: informa o utilizador que não foram encontrados ficheiros de certificados para esse colaborador.
+19. CONSULTAS AO ROSTER DE COLABORADORES — quando o utilizador perguntar sobre estrutura organizacional, equipas, gestores ou quais colaboradores ainda não têm CV:
+    - Chama query_employee_roster com o(s) filtro(s) adequado(s).
+    - Para perguntas sobre "CV em falta", usa missing_cv_only=true. Para "colaboradores do gestor X", usa manager_name=X. Para equipas, usa team=Y.
+    - O roster usa o formato 'APELIDO Nome' para o campo manager_name. Aceita qualquer ordem do utilizador e passa como está; a ferramenta usa correspondência parcial.
+    - Apresenta os colaboradores num formato claro. Se missing_cv_only=true, indica que estas pessoas ainda não têm CV no sistema e sugere o envio dos CVs.
+    - Para listas grandes, resume por equipa ou gestor quando útil.
 """
 
 # ------------------------------------------------------------------ #
@@ -694,6 +746,13 @@ def _dispatch_tool(name: str, args: dict) -> Any:
             return _tool_translate_cv_to_pdf(
                 employee_name=args.get("employee_name", ""),
                 target_language=args.get("target_language", "en"),
+            )
+        if name == "query_employee_roster":
+            return _tool_query_employee_roster(
+                manager_name=args.get("manager_name"),
+                team=args.get("team"),
+                active_only=bool(args.get("active_only", True)),
+                missing_cv_only=bool(args.get("missing_cv_only", False)),
             )
     except Exception:
         logger.exception("Agent: tool %s raised an exception with args %s", name, args)
@@ -1442,6 +1501,106 @@ def _tool_create_csv_report(
         "url": url,
         "filename": f"{safe_title}.csv",
         "row_count": len(rows),
+    }
+
+
+def _tool_query_employee_roster(
+    manager_name: str | None = None,
+    team: str | None = None,
+    active_only: bool = True,
+    missing_cv_only: bool = False,
+) -> dict:
+    """Query the owv_employees roster table with optional filters."""
+    where_parts: list[str] = []
+    params: list[Any] = []
+
+    if active_only:
+        where_parts.append("o.active = true")
+
+    if manager_name:
+        where_parts.append("o.manager_name ilike %s")
+        params.append(f"%{manager_name}%")
+
+    if team:
+        where_parts.append("o.team ilike %s")
+        params.append(f"%{team}%")
+
+    if missing_cv_only:
+        # Join against the CV-centric employees table using display_name
+        # (first + last word of fullName, e.g. "Rui Abel") which matches
+        # the filename-derived full_name stored in employees.
+        join_clause = """
+            left join employees e
+                   on lower(o.display_name) = lower(e.full_name)
+        """
+        where_parts.append("e.employee_id is null")
+    else:
+        join_clause = ""
+
+    where_sql = ("where " + " and ".join(where_parts)) if where_parts else ""
+
+    sql = f"""
+        select
+            o.full_name,
+            o.name        as short_name,
+            o.email,
+            o.team,
+            o.manager_name,
+            o.do_executive_manager_name,
+            o.date_started,
+            o.date_end,
+            o.active
+        from owv_employees o
+        {join_clause}
+        {where_sql}
+        order by o.full_name
+        limit 500
+    """
+
+    try:
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                # Check if owv_employees table exists yet (may not be synced)
+                cur.execute(
+                    "select to_regclass('owv_employees') as tbl"
+                )
+                row = cur.fetchone()
+                if row is None or row["tbl"] is None:
+                    return {
+                        "error": "OWV employee roster is not available. "
+                                 "Ensure OWV_USERNAME and OWV_PAT are configured and the service has synced."
+                    }
+
+                cur.execute(sql, params)
+                rows = [dict(r) for r in cur.fetchall()]
+    except Exception:
+        logger.exception("Agent: query_employee_roster failed")
+        return {"error": "Failed to query employee roster"}
+
+    if not rows:
+        msg_parts: list[str] = []
+        if manager_name:
+            msg_parts.append(f"manager '{manager_name}'")
+        if team:
+            msg_parts.append(f"team '{team}'")
+        if missing_cv_only:
+            msg_parts.append("missing CV")
+        context = " / ".join(msg_parts) or "the given filters"
+        return {
+            "employees": [],
+            "total": 0,
+            "note": f"No employees found for {context}.",
+        }
+
+    return {
+        "employees": rows,
+        "total": len(rows),
+        "filters_applied": {
+            "manager_name": manager_name,
+            "team": team,
+            "active_only": active_only,
+            "missing_cv_only": missing_cv_only,
+        },
     }
 
 

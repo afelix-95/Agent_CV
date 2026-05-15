@@ -52,7 +52,20 @@ class Settings(BaseSettings):
     # Secure file download endpoint
     file_download_secret: str = ""
 
+    # OWV employee roster API
+    # Endpoint that returns the full list of employees with org hierarchy data.
+    owv_api_url: str = "https://owv-qua.axiansms.pt/api/GetPeople"
+    owv_username: str = ""
+    owv_pat: str = ""
+    # How often (in seconds) to re-sync the OWV roster (default: daily)
+    owv_sync_interval_seconds: int = 86400
+
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
 
 settings = Settings()
+
+
+def owv_configured() -> bool:
+    """Return True when the OWV API credentials are present."""
+    return bool(settings.owv_username and settings.owv_pat)
