@@ -566,12 +566,12 @@ _EXTRACTION_SCHEMA = {
     ],
     "education": [
         {
-            "from_date": "string – e.g. 09/2015",
-            "to_date": "string – e.g. 06/2019 (empty if current)",
+            "from_date": "string – e.g. 09/2015 (use issue date for certifications; empty if unknown)",
+            "to_date": "string – e.g. 06/2019 (empty for point-in-time certifications or if current)",
             "is_current": "boolean",
-            "title": "string – degree or qualification name",
-            "activities": "string – subjects, thesis, notable work (optional)",
-            "org_name": "string – institution name",
+            "title": "string – degree, qualification name, OR certification/license name",
+            "activities": "string – subjects, thesis, notable work, or certification description (optional)",
+            "org_name": "string – institution name OR certifying body / vendor name",
             "org_city": "string",
             "org_country": "string",
         }
@@ -587,9 +587,9 @@ _EXTRACTION_SCHEMA = {
             "writing": "string – CEFR level",
         }
     ],
-    "communication_skills": "string – paragraph",
-    "computer_skills": "string – paragraph",
-    "other_skills": "string – paragraph (hobbies, volunteering, etc.)",
+    "communication_skills": "string – interpersonal or soft-skills paragraph (do NOT include certifications or technical tools here)",
+    "computer_skills": "string – brief paragraph on technical environment, tools, and platforms the person works with (do NOT list certification names here; those belong in 'education')",
+    "other_skills": "string – paragraph for hobbies, volunteering, driving licence details, etc. (do NOT include certifications here)",
 }
 
 
@@ -617,7 +617,11 @@ def _extract_and_translate(
             + (f", issued {c['issue_date']}" if c.get("issue_date") else "")
             for c in employee_info["certifications"][:20]
         ]
-        cert_summary = "Professional certifications on record:\n" + "\n".join(lines)
+        cert_summary = (
+            "Professional certifications on record (each MUST appear as a separate entry "
+            "in the 'education' array with org_name = certifying body):\n"
+            + "\n".join(lines)
+        )
 
     system_prompt = (
         f"You are an expert CV analyst and professional translator. "
@@ -626,6 +630,14 @@ def _extract_and_translate(
         f"Return ONLY a valid JSON object matching the schema below. "
         f"Do not include any explanation or markdown fences. "
         f"Leave a field as an empty string or empty array if the information is not present in the CV.\n\n"
+        f"IMPORTANT RULES:\n"
+        f"- ALL professional certifications, licenses, and vendor qualifications (e.g. CCNP, CCNA, "
+        f"Fortinet NSE, AZ-900, ITIL, ISO certifications, Red Hat, AWS, etc.) MUST be placed as "
+        f"individual entries in the 'education' array, NOT in computer_skills or other_skills.\n"
+        f"- Use org_name for the certifying body (e.g. 'Cisco', 'Microsoft', 'Fortinet').\n"
+        f"- Use from_date for the issue/completion date when available.\n"
+        f"- computer_skills should only describe the technical environment and tools, not list cert names.\n"
+        f"- other_skills should only contain soft skills, hobbies, or volunteering info.\n\n"
         f"JSON schema:\n{json.dumps(_EXTRACTION_SCHEMA, indent=2, ensure_ascii=False)}"
     )
 
