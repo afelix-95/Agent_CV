@@ -107,21 +107,76 @@ class OWVSyncService:
             logger.warning("OWV sync: API returned empty list — skipping sync to avoid wiping data")
             return SyncResult(upserted=0, deactivated=0)
 
+        # ------------------------------------------------------------------
+        # Deduplicate by display_name before upserting.
+        # OWV sometimes contains multiple entries for the same person
+        # (e.g. integration artefacts, test accounts). Keeping duplicates
+        # causes false "missing CV" results because only one duplicate row
+        # matches the employees table while the other floats through.
+        # Strategy: for each display_name keep the most complete active entry,
+        # scored by the number of populated meaningful fields. Break ties by
+        # highest owv_id (the newest record tends to be the canonical one).
+        # ------------------------------------------------------------------
+
+        _COMPLETENESS_FIELDS = ("name", "fullName", "email", "team", "manager", "doExecutiveManager", "dateStarted")
+
+        def _completeness(p: dict) -> int:
+            return sum(1 for f in _COMPLETENESS_FIELDS if p.get(f))
+
+        canonical: dict[str, dict] = {}  # display_name -> best person dict
+        for person in people:
+            # Skip ex-employees — OWV returns them with active=False.
+            # Departed employees that disappear from the API entirely are
+            # handled by the soft-delete step below, so we don't need to
+            # ingest inactive rows at all.
+            if not person.get("active", True):
+                continue
+            owv_id = person.get("id")
+            if owv_id is None:
+                continue
+            name = (person.get("name") or "").strip()
+            display_name = _compute_display_name(name)
+            if not display_name:
+                continue
+            existing = canonical.get(display_name)
+            if existing is None:
+                canonical[display_name] = person
+            else:
+                # Both entries are active (OWV data quality issue).
+                # Keep the most complete one; break ties by highest owv_id
+                # (the newest record tends to be the canonical one).
+                curr_score = _completeness(person)
+                prev_score = _completeness(existing)
+                curr_id = int(owv_id)
+                prev_id = int(existing.get("id", 0))
+                if curr_score > prev_score or (curr_score == prev_score and curr_id > prev_id):
+                    canonical[display_name] = person
+                    logger.warning(
+                        "OWV sync: duplicate active display_name %r — keeping owv_id=%d (score %d), discarding owv_id=%d (score %d)",
+                        display_name, curr_id, curr_score, prev_id, prev_score,
+                    )
+                else:
+                    logger.warning(
+                        "OWV sync: duplicate active display_name %r — keeping owv_id=%d (score %d), discarding owv_id=%d (score %d)",
+                        display_name, prev_id, prev_score, curr_id, curr_score,
+                    )
+
         upserted = 0
         deactivated = 0
         received_ids: list[int] = []
 
         with get_connection() as conn:
             with conn.cursor() as cur:
-                for person in people:
+                for person in canonical.values():
                     owv_id = person.get("id")
                     if owv_id is None:
                         continue
                     received_ids.append(owv_id)
 
                     full_name = (person.get("fullName") or "").strip()
-                    display_name = _compute_display_name(full_name)
                     name = (person.get("name") or "").strip()
+                    # display_name already computed during dedup; recompute for clarity
+                    display_name = _compute_display_name(name)
                     email = person.get("email") or None
                     team = person.get("team") or None
                     manager_name = person.get("manager") or None
@@ -217,19 +272,27 @@ class OWVSyncService:
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _compute_display_name(full_name: str) -> str:
-    """Extract 'Firstname Lastname' from a full name that may contain middle names.
+def _compute_display_name(owv_short_name: str) -> str:
+    """Compute 'Firstname Lastname' from OWV's 'LASTNAME Firstname' name field.
+
+    The `name` field from OWV is always in 'LASTNAME Firstname' format and is
+    reliable. We reverse the two parts and normalise the lastname to title case
+    so it can be matched (case-insensitively) against employees.full_name, which
+    is derived from filenames and is typically 'Firstname Lastname'.
 
     Examples:
-        "Rui Manuel Mateus Abel" → "Rui Abel"
-        "Maria João Silva"       → "Maria Silva"
-        "João Costa"             → "João Costa"
-        ""                       → ""
+        "ABEL Rui"              → "Rui Abel"
+        "ANTUNES Mauro"         → "Mauro Antunes"
+        "JORGE-OLIVEIRA Fernando" → "Fernando Jorge-Oliveira"
+        "GUILHOTO Vitorino"     → "Vitorino Guilhoto"
     """
-    parts = full_name.split()
-    if len(parts) <= 1:
-        return full_name
-    return f"{parts[0]} {parts[-1]}"
+    parts = owv_short_name.split(' ', 1)  # split at first space only
+    if len(parts) != 2:
+        return owv_short_name
+    lastname_raw, firstname = parts
+    # Normalise lastname to title case, preserving hyphens
+    lastname = '-'.join(segment.capitalize() for segment in lastname_raw.split('-'))
+    return f"{firstname} {lastname}"
 
 
 def _parse_date(value: object) -> object:

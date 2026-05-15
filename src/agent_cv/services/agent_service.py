@@ -1526,14 +1526,17 @@ def _tool_query_employee_roster(
         params.append(f"%{team}%")
 
     if missing_cv_only:
-        # Join against the CV-centric employees table using display_name
-        # (first + last word of fullName, e.g. "Rui Abel") which matches
-        # the filename-derived full_name stored in employees.
-        join_clause = """
-            left join employees e
-                   on lower(o.display_name) = lower(e.full_name)
-        """
-        where_parts.append("e.employee_id is null")
+        # Use NOT EXISTS rather than a LEFT JOIN so that the check is
+        # "does any employees row match this display_name?" — this is
+        # immune to duplicate owv_employees rows for the same person,
+        # which a LEFT JOIN would let slip through as false "missing CV".
+        join_clause = ""
+        where_parts.append(
+            "not exists ("
+            " select 1 from employees e"
+            " where lower(e.full_name) = lower(o.display_name)"
+            ")"
+        )
     else:
         join_clause = ""
 
@@ -1541,8 +1544,8 @@ def _tool_query_employee_roster(
 
     sql = f"""
         select
-            o.full_name,
-            o.name        as short_name,
+            o.display_name  as employee_name,
+            o.full_name     as owv_full_name,
             o.email,
             o.team,
             o.manager_name,
@@ -1553,7 +1556,7 @@ def _tool_query_employee_roster(
         from owv_employees o
         {join_clause}
         {where_sql}
-        order by o.full_name
+        order by o.display_name
         limit 500
     """
 
