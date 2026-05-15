@@ -281,6 +281,14 @@ TOOLS: list[dict] = [
                             "Use for questions like 'whose CV is missing?'."
                         ),
                     },
+                    "export_as_csv": {
+                        "type": "boolean",
+                        "description": (
+                            "If true, export the results directly to a CSV file and return a download URL "
+                            "instead of the raw data. Use whenever the user asks for a CSV download or "
+                            "export of roster/employee data — do NOT call create_csv_report separately."
+                        ),
+                    },
                 },
                 "required": [],
             },
@@ -364,7 +372,7 @@ HOW TO RESPOND:
 14. PAGINATION — search_certifications returns 15 results per page. When has_more=true in the result, tell the user how many results remain and offer to show more. When the user asks to see more results (e.g. "show more", "next", "ver mais"), call search_certifications again with the same query/status and offset=next_offset from the previous result.
 15. BULK EXPORTS — when the user asks to export, download, or compile all certifications into a table or file:
     - For certification data: call export_certifications_csv ONCE with the appropriate filters (e.g. expired_only=true for expired certs). Do NOT paginate search_certifications to collect data for an export.
-    - For non-certification lists (e.g. all employees): use create_csv_report after collecting the data.
+    - For non-certification lists (e.g. all employees from the roster): call query_employee_roster with export_as_csv=true — do NOT call create_csv_report separately. The CSV is generated server-side.
     - Reply with a brief message explaining the file was generated because the results are too large for chat, along with the download link.
 16. CV TRANSLATION — when the user asks to translate an employee's CV into another language:
     - Call translate_cv_to_pdf with the employee's name and the target language ISO 639-1 code.
@@ -433,7 +441,7 @@ COMO RESPONDER:
 14. PAGINAÇÃO — search_certifications devolve 15 resultados por página. Quando has_more=true no resultado, informa o utilizador de quantos resultados restam e oferece mostrar mais. Quando o utilizador pedir para ver mais resultados (ex: "mostrar mais", "ver mais", "próximos"), chama search_certifications novamente com o mesmo query/status e offset=next_offset do resultado anterior.
 15. EXPORTAÇÕES — quando o utilizador pedir para exportar, descarregar ou compilar certificações numa tabela ou ficheiro:
     - Para dados de certificações: chama export_certifications_csv UMA VEZ com os filtros adequados (ex: expired_only=true para vencidas). NÃO uses paginação com search_certifications para recolher dados para uma exportação.
-    - Para listas não relacionadas com certificações (ex: todos os colaboradores): usa create_csv_report depois de recolher os dados.
+    - Para listas não relacionadas com certificações (ex: todos os colaboradores do roster): chama query_employee_roster com export_as_csv=true — NÃO chames create_csv_report separadamente. O CSV é gerado no servidor.
     - Responde com uma mensagem breve a explicar que o ficheiro foi gerado porque os resultados são demasiados para o chat, juntamente com o link de transferência.
 16. TRADUÇÃO DE CV — quando o utilizador pedir para traduzir o CV de um colaborador para outro idioma:
     - Chama translate_cv_to_pdf com o nome do colaborador e o código ISO 639-1 do idioma de destino.
@@ -459,6 +467,7 @@ COMO RESPONDER:
     - O roster usa o formato 'APELIDO Nome' para o campo manager_name. Aceita qualquer ordem do utilizador e passa como está; a ferramenta usa correspondência parcial.
     - Apresenta os colaboradores num formato claro. Se missing_cv_only=true, indica que estas pessoas ainda não têm CV no sistema e sugere o envio dos CVs.
     - Para listas grandes, resume por equipa ou gestor quando útil.
+    - Se o utilizador pedir um CSV ou exportação da lista, chama query_employee_roster novamente com export_as_csv=true (mantém os restantes filtros) e partilha o link devolvido.
 """
 
 # ------------------------------------------------------------------ #
@@ -753,6 +762,7 @@ def _dispatch_tool(name: str, args: dict) -> Any:
                 team=args.get("team"),
                 active_only=bool(args.get("active_only", True)),
                 missing_cv_only=bool(args.get("missing_cv_only", False)),
+                export_as_csv=bool(args.get("export_as_csv", False)),
             )
     except Exception:
         logger.exception("Agent: tool %s raised an exception with args %s", name, args)
@@ -1509,6 +1519,7 @@ def _tool_query_employee_roster(
     team: str | None = None,
     active_only: bool = True,
     missing_cv_only: bool = False,
+    export_as_csv: bool = False,
 ) -> dict:
     """Query the owv_employees roster table with optional filters."""
     where_parts: list[str] = []
@@ -1593,6 +1604,47 @@ def _tool_query_employee_roster(
             "employees": [],
             "total": 0,
             "note": f"No employees found for {context}.",
+        }
+
+    _CSV_THRESHOLD = 50
+
+    if export_as_csv or len(rows) > _CSV_THRESHOLD:
+        import csv
+        import os
+        import re
+        import uuid
+        from agent_cv.api.routes import generate_export_url
+
+        parts: list[str] = []
+        if missing_cv_only:
+            parts.append("missing_cv")
+        if manager_name:
+            parts.append(re.sub(r"[^\w]", "_", manager_name.strip())[:30])
+        if team:
+            parts.append(re.sub(r"[^\w]", "_", team.strip())[:30])
+        safe_title = "employees_" + "_".join(parts) if parts else "employees_roster"
+
+        columns = ["employee_name", "owv_full_name", "email", "team", "manager_name",
+                   "do_executive_manager_name", "date_started", "date_end", "active"]
+        export_id = str(uuid.uuid4())
+        export_dir = "/tmp/agent_cv_exports"
+        os.makedirs(export_dir, exist_ok=True)
+        csv_path = os.path.join(export_dir, f"{export_id}.csv")
+        try:
+            with open(csv_path, "w", newline="", encoding="utf-8-sig") as f:
+                writer = csv.DictWriter(f, fieldnames=columns, extrasaction="ignore")
+                writer.writeheader()
+                writer.writerows(rows)
+        except Exception:
+            logger.exception("Agent: query_employee_roster export failed for %s", csv_path)
+            return {"error": "Failed to generate CSV file"}
+
+        url = generate_export_url(export_id)
+        logger.info("Agent: created roster CSV export %s with %d rows", export_id, len(rows))
+        return {
+            "url": url,
+            "filename": f"{safe_title}.csv",
+            "row_count": len(rows),
         }
 
     return {
