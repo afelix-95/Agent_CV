@@ -108,14 +108,17 @@ class OWVSyncService:
             return SyncResult(upserted=0, deactivated=0)
 
         # ------------------------------------------------------------------
-        # Deduplicate by display_name before upserting.
+        # Deduplicate before upserting.
         # OWV sometimes contains multiple entries for the same person
-        # (e.g. integration artefacts, test accounts). Keeping duplicates
-        # causes false "missing CV" results because only one duplicate row
-        # matches the employees table while the other floats through.
-        # Strategy: for each display_name keep the most complete active entry,
-        # scored by the number of populated meaningful fields. Break ties by
-        # highest owv_id (the newest record tends to be the canonical one).
+        # (e.g. integration artefacts, test accounts with malformed names).
+        # Keeping duplicates causes false "missing CV" results.
+        #
+        # Primary key: email (normalised lowercase) — reliable across entries
+        #   even when the name field has different capitalisation/order.
+        # Fallback key: display_name — used when email is absent.
+        #
+        # Within each group keep the most complete entry (most non-null
+        # meaningful fields). Break ties by highest owv_id.
         # ------------------------------------------------------------------
 
         _COMPLETENESS_FIELDS = ("name", "fullName", "email", "team", "manager", "doExecutiveManager", "dateStarted")
@@ -123,7 +126,7 @@ class OWVSyncService:
         def _completeness(p: dict) -> int:
             return sum(1 for f in _COMPLETENESS_FIELDS if p.get(f))
 
-        canonical: dict[str, dict] = {}  # display_name -> best person dict
+        canonical: dict[str, dict] = {}  # dedup_key -> best person dict
         for person in people:
             # Skip ex-employees — OWV returns them with active=False.
             # Departed employees that disappear from the API entirely are
@@ -138,27 +141,35 @@ class OWVSyncService:
             display_name = _compute_display_name(name)
             if not display_name:
                 continue
-            existing = canonical.get(display_name)
+
+            # Use email as the dedup key when available; fall back to
+            # display_name. This ensures entries like owv_id=210/320/338
+            # for the same person (same email, but name stored in different
+            # order) are treated as duplicates even though their computed
+            # display_name differs.
+            email = (person.get("email") or "").strip().lower()
+            dedup_key = email if email else display_name.lower()
+
+            existing = canonical.get(dedup_key)
             if existing is None:
-                canonical[display_name] = person
+                canonical[dedup_key] = person
             else:
                 # Both entries are active (OWV data quality issue).
-                # Keep the most complete one; break ties by highest owv_id
-                # (the newest record tends to be the canonical one).
+                # Keep the most complete one; break ties by highest owv_id.
                 curr_score = _completeness(person)
                 prev_score = _completeness(existing)
                 curr_id = int(owv_id)
                 prev_id = int(existing.get("id", 0))
                 if curr_score > prev_score or (curr_score == prev_score and curr_id > prev_id):
-                    canonical[display_name] = person
+                    canonical[dedup_key] = person
                     logger.warning(
-                        "OWV sync: duplicate active display_name %r — keeping owv_id=%d (score %d), discarding owv_id=%d (score %d)",
-                        display_name, curr_id, curr_score, prev_id, prev_score,
+                        "OWV sync: duplicate active person (key=%r) — keeping owv_id=%d (score %d), discarding owv_id=%d (score %d)",
+                        dedup_key, curr_id, curr_score, prev_id, prev_score,
                     )
                 else:
                     logger.warning(
-                        "OWV sync: duplicate active display_name %r — keeping owv_id=%d (score %d), discarding owv_id=%d (score %d)",
-                        display_name, prev_id, prev_score, curr_id, curr_score,
+                        "OWV sync: duplicate active person (key=%r) — keeping owv_id=%d (score %d), discarding owv_id=%d (score %d)",
+                        dedup_key, prev_id, prev_score, curr_id, curr_score,
                     )
 
         upserted = 0

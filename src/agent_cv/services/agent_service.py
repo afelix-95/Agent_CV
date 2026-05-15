@@ -1522,11 +1522,12 @@ def _tool_query_employee_roster(
     export_as_csv: bool = False,
 ) -> dict:
     """Query the owv_employees roster table with optional filters."""
+    # active_only goes into the CTE so deduplication only considers active rows.
+    # Other filters (manager, team, missing_cv) are applied in the outer query.
+    cte_where = "where active = true" if active_only else ""
+
     where_parts: list[str] = []
     params: list[Any] = []
-
-    if active_only:
-        where_parts.append("o.active = true")
 
     if manager_name:
         where_parts.append("o.manager_name ilike %s")
@@ -1541,19 +1542,35 @@ def _tool_query_employee_roster(
         # "does any employees row match this display_name?" — this is
         # immune to duplicate owv_employees rows for the same person,
         # which a LEFT JOIN would let slip through as false "missing CV".
-        join_clause = ""
         where_parts.append(
             "not exists ("
             " select 1 from employees e"
             " where lower(e.full_name) = lower(o.display_name)"
             ")"
         )
-    else:
-        join_clause = ""
 
     where_sql = ("where " + " and ".join(where_parts)) if where_parts else ""
 
+    # Completeness score expression — mirrors the Python dedup in tick().
+    # Prefer rows with more non-null meaningful fields; break ties by highest owv_id.
+    completeness_expr = (
+        "(case when email is not null then 1 else 0 end"
+        " + case when team is not null then 1 else 0 end"
+        " + case when manager_name is not null then 1 else 0 end"
+        " + case when do_executive_manager_name is not null then 1 else 0 end"
+        " + case when date_started is not null then 1 else 0 end)"
+    )
+
     sql = f"""
+        with deduped as (
+            select distinct on (lower(display_name)) *
+            from owv_employees
+            {cte_where}
+            order by
+                lower(display_name),
+                {completeness_expr} desc,
+                owv_id desc
+        )
         select
             o.display_name  as employee_name,
             o.full_name     as owv_full_name,
@@ -1564,8 +1581,7 @@ def _tool_query_employee_roster(
             o.date_started,
             o.date_end,
             o.active
-        from owv_employees o
-        {join_clause}
+        from deduped o
         {where_sql}
         order by o.display_name
         limit 500
