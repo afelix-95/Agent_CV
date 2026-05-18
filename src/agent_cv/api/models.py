@@ -14,6 +14,7 @@ class QueryRequest(BaseModel):
     query: str = Field(min_length=2)
     language: Literal["pt", "en"] | None = None
     conversation_id: str | None = None
+    images: list[str] | None = None  # base64 data-URL strings for inline images
 
 
 class CertificationHit(BaseModel):

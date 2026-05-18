@@ -90,6 +90,7 @@ def query(request: QueryRequest) -> QueryResponse:
         request.query,
         request.language,
         request.conversation_id,
+        images=request.images,
     )
     _safe_audit(
         query_text=request.query,

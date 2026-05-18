@@ -65,11 +65,67 @@ BACKEND_SSL_VERIFY: bool | str = (
 )
 
 
-async def _query_backend(query_text: str, conversation_id: str | None) -> tuple[str | None, str | None]:
-    payload = {
+_bot_token_cache: dict = {"token": None, "expires_at": 0.0}
+
+
+async def _get_bot_service_token() -> str | None:
+    """Acquire a Bot Framework bearer token for downloading Teams attachment images."""
+    if _skip_auth or not (_client_id and _client_secret):
+        return None
+    now = time.time()
+    if _bot_token_cache["token"] and _bot_token_cache["expires_at"] > now + 60:
+        return _bot_token_cache["token"]
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.post(
+                "https://login.microsoftonline.com/botframework.com/oauth2/v2.0/token",
+                data={
+                    "grant_type": "client_credentials",
+                    "client_id": _client_id,
+                    "client_secret": _client_secret,
+                    "scope": "https://api.botframework.com/.default",
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            _bot_token_cache["token"] = data["access_token"]
+            _bot_token_cache["expires_at"] = now + int(data.get("expires_in", 3600))
+            return _bot_token_cache["token"]
+    except Exception:
+        logger.debug("Could not acquire bot service token for image download", exc_info=True)
+        return None
+
+
+async def _download_attachment_image(content_url: str, content_type: str) -> str | None:
+    """Download a Teams attachment and return a base64 data-URL string, or None on failure."""
+    _MAX_IMAGE_BYTES = 5 * 1024 * 1024  # 5 MB encoded limit
+    try:
+        token = await _get_bot_service_token()
+        headers = {}
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        async with httpx.AsyncClient(timeout=20.0, follow_redirects=True, verify=BACKEND_SSL_VERIFY) as client:
+            resp = await client.get(content_url, headers=headers)
+            resp.raise_for_status()
+            raw = resp.content
+        mime = content_type if content_type.startswith("image/") else "image/png"
+        b64 = base64.b64encode(raw).decode("utf-8")
+        if len(b64) > _MAX_IMAGE_BYTES:
+            logger.warning("Attachment image too large (%d bytes encoded) — skipping", len(b64))
+            return None
+        return f"data:{mime};base64,{b64}"
+    except Exception:
+        logger.debug("Failed to download Teams attachment from %s", content_url, exc_info=True)
+        return None
+
+
+async def _query_backend(query_text: str, conversation_id: str | None, images: list[str] | None = None) -> tuple[str | None, str | None]:
+    payload: dict = {
         "query": query_text,
         "conversation_id": conversation_id,
     }
+    if images:
+        payload["images"] = images
     try:
         async with httpx.AsyncClient(timeout=BACKEND_TIMEOUT_SECONDS, follow_redirects=True, verify=BACKEND_SSL_VERIFY) as client:
             response = await client.post(BACKEND_QUERY_URL, json=payload)
@@ -141,14 +197,32 @@ async def handle_message(ctx: ActivityContext[MessageActivity]):
         await ctx.reply(TypingActivityInput())
     except Exception:
         logger.debug("Could not send typing indicator", exc_info=True)
+
     user_text = (ctx.activity.text or "").strip()
-    if not user_text:
+
+    # Download any image attachments (inline screenshots, pasted images)
+    images: list[str] = []
+    attachments = getattr(ctx.activity, "attachments", None) or []
+    for att in attachments[:4]:  # Limit to 4 images
+        content_type = getattr(att, "content_type", "") or ""
+        content_url = getattr(att, "content_url", "") or ""
+        if content_type.startswith("image/") and content_url:
+            data_url = await _download_attachment_image(content_url, content_type)
+            if data_url:
+                images.append(data_url)
+                logger.debug("Attached image downloaded: %s (%d chars)", content_type, len(data_url))
+
+    if not user_text and not images:
         await ctx.send("Please enter a query.")
         return
 
+    # When a user sends only an image with no text, use a neutral prompt
+    if not user_text and images:
+        user_text = "Analisa a imagem em anexo."
+
     conversation = getattr(ctx.activity, "conversation", None)
     conversation_id = getattr(conversation, "id", None)
-    result_text, error_text = await _query_backend(user_text, conversation_id)
+    result_text, error_text = await _query_backend(user_text, conversation_id, images or None)
     if error_text:
         await ctx.send(error_text)
         return

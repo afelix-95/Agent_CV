@@ -20,6 +20,7 @@ hidden or pending chats that slipped through.
 from __future__ import annotations
 
 import asyncio
+import base64
 import html as _html
 import logging
 import re
@@ -40,6 +41,9 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _STRIP_HTML = re.compile(r"<[^>]+>")
+# Regex to find inline hosted-content image references inside Teams HTML message bodies.
+# Example: <img src="../hostedContents/aWQ9L.../$value" ...>
+_HOSTED_IMG_RE = re.compile(r'\.\.[\/]hostedContents[\/]([^\/"]+)[\/]\$value', re.IGNORECASE)
 # Subscription lifetime in seconds — 3600 is the delegated-auth maximum for chat messages
 _SUBSCRIPTION_LIFETIME_S: int = 3600
 # Renew this many seconds before expiry (leaves a 10-minute safety margin)
@@ -53,6 +57,44 @@ _RESOURCE_RE = re.compile(
 _MAX_PROCESSED_MSGS: int = 10_000
 # How often (seconds) to poll for pending/hidden chats — fallback safety net only
 _CHAT_POLL_INTERVAL_S: int = 1800  # 30 minutes
+
+
+async def _download_graph_image(chat_id: str, message_id: str, hosted_content_id: str) -> str | None:
+    """Download an inline image from a Teams message via the Graph hosted-contents endpoint.
+
+    Returns a base64 data-URL string (``data:<mime>;base64,...``) or None on failure.
+    The same delegated Graph token used for all other Graph calls is sufficient.
+    """
+    _MAX_IMAGE_BYTES = 5 * 1024 * 1024  # 5 MB encoded limit
+    try:
+        token = await asyncio.to_thread(get_access_token)
+        url = (
+            f"https://graph.microsoft.com/v1.0"
+            f"/chats/{chat_id}/messages/{message_id}"
+            f"/hostedContents/{hosted_content_id}/$value"
+        )
+        async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as http:
+            resp = await http.get(url, headers={"Authorization": f"Bearer {token}"})
+            resp.raise_for_status()
+            raw = resp.content
+            mime = resp.headers.get("content-type", "image/png").split(";")[0].strip()
+            if not mime.startswith("image/"):
+                mime = "image/png"
+        b64 = base64.b64encode(raw).decode("utf-8")
+        if len(b64) > _MAX_IMAGE_BYTES:
+            logger.warning(
+                "Teams webhook bot: hosted-content image too large (%d bytes encoded) — skipping",
+                len(b64),
+            )
+            return None
+        return f"data:{mime};base64,{b64}"
+    except Exception:
+        logger.debug(
+            "Teams webhook bot: failed to download hostedContent %s",
+            hosted_content_id,
+            exc_info=True,
+        )
+        return None
 
 
 class TeamsWebhookBot:
@@ -672,19 +714,37 @@ class TeamsWebhookBot:
         content_type_val = (
             getattr(content_type, "value", str(content_type)) if content_type else ""
         )
+        # Extract inline images from hosted contents (pasted screenshots, etc.)
+        images: list[str] = []
+        if content_type_val == "html" and raw_content:
+            hosted_ids = _HOSTED_IMG_RE.findall(raw_content)
+            for hid in hosted_ids[:4]:  # cap at 4 images per message
+                data_url = await _download_graph_image(chat_id, message_id, hid)
+                if data_url:
+                    images.append(data_url)
+                    logger.debug(
+                        "Teams webhook bot: downloaded hosted-content image %s (%d chars)",
+                        hid,
+                        len(data_url),
+                    )
+
         text = (
             _STRIP_HTML.sub("", raw_content).strip()
             if content_type_val == "html"
             else raw_content.strip()
         )
 
-        if not text:
+        if not text and not images:
             return
+
+        # Provide a neutral fallback query when the user sends only an image
+        if not text and images:
+            text = "Analisa a imagem em anexo."
 
         logger.info(
             "Teams webhook bot: new message %s in chat %s — %.80s", message_id, chat_id, text
         )
-        await self._handle_message(client, chat_id, message_id, text, sender_id)
+        await self._handle_message(client, chat_id, message_id, text, sender_id, images or None)
 
     async def handle_chat_notification(self, resource: str, client_state: str) -> None:
         """Handle a Graph change notification for /me/chats (new chat created).
@@ -773,6 +833,7 @@ class TeamsWebhookBot:
         msg_id: str,
         text: str,
         sender_id: str | None,
+        images: list[str] | None = None,
     ) -> None:
         from msgraph.generated.models.body_type import BodyType
         from msgraph.generated.models.chat_message import ChatMessage
@@ -781,7 +842,7 @@ class TeamsWebhookBot:
         started = time.perf_counter()
         result = None
         try:
-            result = await asyncio.to_thread(handle_user_query, text, None, chat_id)
+            result = await asyncio.to_thread(handle_user_query, text, None, chat_id, images)
         except Exception:
             logger.exception(
                 "Teams webhook bot: query pipeline error for message %s", msg_id

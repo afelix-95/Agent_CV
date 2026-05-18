@@ -521,6 +521,7 @@ def handle_user_query(
     query_text: str,
     preferred_language: str | None,
     conversation_id: str | None,
+    images: list[str] | None = None,
 ) -> AgentQueryResult:
     state_key = (conversation_id or "default").strip() or "default"
     with _STATE_LOCK:
@@ -561,7 +562,14 @@ def handle_user_query(
                 messages.append({"role": "assistant", "content": past_assistant})
 
     messages.append({"role": "user", "content": query_text})
-
+    # If the user included images (inline screenshots), build a multimodal message so
+    # the vision-capable model can read the content of the image directly.
+    if images:
+        user_content: list[dict] = [{"type": "text", "text": query_text}]
+        for data_url in images[:4]:  # cap at 4 images per turn
+            user_content.append({"type": "image_url", "image_url": {"url": data_url}})
+        # Replace the plain-text user message with the multimodal one
+        messages[-1] = {"role": "user", "content": user_content}
     tool_call_count = 0
     tool_calls_log: list[dict] = []
     answer = ""
