@@ -41,9 +41,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _STRIP_HTML = re.compile(r"<[^>]+>")
-# Regex to find inline hosted-content image references inside Teams HTML message bodies.
-# Example: <img src="../hostedContents/aWQ9L.../$value" ...>
-_HOSTED_IMG_RE = re.compile(r'\.\.[\/]hostedContents[\/]([^\/"]+)[\/]\$value', re.IGNORECASE)
 # Subscription lifetime in seconds — 3600 is the delegated-auth maximum for chat messages
 _SUBSCRIPTION_LIFETIME_S: int = 3600
 # Renew this many seconds before expiry (leaves a 10-minute safety margin)
@@ -59,42 +56,174 @@ _MAX_PROCESSED_MSGS: int = 10_000
 _CHAT_POLL_INTERVAL_S: int = 1800  # 30 minutes
 
 
-async def _download_graph_image(chat_id: str, message_id: str, hosted_content_id: str) -> str | None:
-    """Download an inline image from a Teams message via the Graph hosted-contents endpoint.
+async def _fetch_hosted_content_images(chat_id: str, message_id: str) -> list[str]:
+    """List and download all image hosted-contents for a Teams message.
 
-    Returns a base64 data-URL string (``data:<mime>;base64,...``) or None on failure.
-    The same delegated Graph token used for all other Graph calls is sufficient.
+    Uses ``GET .../hostedContents`` to discover content IDs rather than
+    parsing the HTML body, so it is not sensitive to the exact URL format
+    that Teams embeds in ``<img src>`` attributes.
+
+    Returns a list of base64 data-URL strings (up to 4 images).
     """
-    _MAX_IMAGE_BYTES = 5 * 1024 * 1024  # 5 MB encoded limit
+    _MAX_IMAGE_BYTES = 5 * 1024 * 1024  # 5 MB encoded limit per image
+    images: list[str] = []
     try:
         token = await asyncio.to_thread(get_access_token)
-        url = (
+        headers = {"Authorization": f"Bearer {token}"}
+        base_url = (
             f"https://graph.microsoft.com/v1.0"
-            f"/chats/{chat_id}/messages/{message_id}"
-            f"/hostedContents/{hosted_content_id}/$value"
+            f"/chats/{chat_id}/messages/{message_id}/hostedContents"
         )
         async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as http:
-            resp = await http.get(url, headers={"Authorization": f"Bearer {token}"})
-            resp.raise_for_status()
-            raw = resp.content
-            mime = resp.headers.get("content-type", "image/png").split(";")[0].strip()
-            if not mime.startswith("image/"):
-                mime = "image/png"
-        b64 = base64.b64encode(raw).decode("utf-8")
-        if len(b64) > _MAX_IMAGE_BYTES:
-            logger.warning(
-                "Teams webhook bot: hosted-content image too large (%d bytes encoded) — skipping",
-                len(b64),
+            list_resp = await http.get(base_url, headers=headers)
+            if list_resp.status_code != 200:
+                logger.debug(
+                    "Teams webhook bot: hostedContents list HTTP %s for msg %s",
+                    list_resp.status_code,
+                    message_id,
+                )
+                return images
+            items = list_resp.json().get("value", [])
+            logger.debug(
+                "Teams webhook bot: msg %s has %d hostedContent item(s)",
+                message_id,
+                len(items),
             )
-            return None
-        return f"data:{mime};base64,{b64}"
+            for item in items[:4]:
+                item_id = item.get("id", "")
+                mime = (item.get("contentType") or "image/png").split(";")[0].strip()
+                if not item_id or not mime.startswith("image/"):
+                    continue
+                val_resp = await http.get(
+                    f"{base_url}/{item_id}/$value",
+                    headers=headers,
+                )
+                if val_resp.status_code != 200:
+                    logger.debug(
+                        "Teams webhook bot: hostedContent /$value HTTP %s for %s",
+                        val_resp.status_code,
+                        item_id,
+                    )
+                    continue
+                raw = val_resp.content
+                b64 = base64.b64encode(raw).decode("utf-8")
+                if len(b64) > _MAX_IMAGE_BYTES:
+                    logger.warning(
+                        "Teams webhook bot: hosted-content image too large (%d bytes encoded) — skipping",
+                        len(b64),
+                    )
+                    continue
+                images.append(f"data:{mime};base64,{b64}")
+                logger.info(
+                    "Teams webhook bot: downloaded hosted-content image %s (%d bytes raw)",
+                    item_id,
+                    len(raw),
+                )
     except Exception:
         logger.debug(
-            "Teams webhook bot: failed to download hostedContent %s",
-            hosted_content_id,
+            "Teams webhook bot: error fetching hostedContents for msg %s",
+            message_id,
             exc_info=True,
         )
-        return None
+    return images
+
+
+_IMAGE_EXTENSIONS = {"png", "jpg", "jpeg", "gif", "bmp", "webp"}
+_IMAGE_MIME = {
+    "png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg",
+    "gif": "image/gif", "bmp": "image/bmp", "webp": "image/webp",
+}
+
+
+async def _fetch_attachment_images(attachments: list) -> list[str]:
+    """Download image files from Teams message file attachments.
+
+    Handles two cases:
+    - ``application/vnd.microsoft.teams.file.download.info``: uploaded image files
+      whose ``content`` JSON contains a pre-authenticated ``downloadUrl``.
+    - ``image/*``: direct image attachments whose ``contentUrl`` can be fetched
+      with the Graph delegated token.
+
+    Returns up to 4 base64 data-URL strings.
+    """
+    import json as _json
+    _MAX_IMAGE_BYTES = 5 * 1024 * 1024
+    images: list[str] = []
+    for att in attachments[:4]:
+        if len(images) >= 4:
+            break
+        ctype = (getattr(att, "content_type", "") or "").lower()
+
+        # --- Case 1: uploaded file (paperclip button) ---
+        if ctype == "application/vnd.microsoft.teams.file.download.info":
+            content_raw = getattr(att, "content", "") or ""
+            try:
+                content_data = (
+                    _json.loads(content_raw)
+                    if isinstance(content_raw, str)
+                    else (content_raw or {})
+                )
+                file_type = (content_data.get("fileType") or "").lower()
+                download_url = content_data.get("downloadUrl", "")
+                if not download_url or file_type not in _IMAGE_EXTENSIONS:
+                    continue
+                # downloadUrl is pre-authenticated — no Authorization header needed
+                async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as http:
+                    resp = await http.get(download_url)
+                    resp.raise_for_status()
+                raw = resp.content
+                mime = _IMAGE_MIME.get(file_type, f"image/{file_type}")
+                b64 = base64.b64encode(raw).decode("utf-8")
+                if len(b64) > _MAX_IMAGE_BYTES:
+                    logger.warning(
+                        "Teams webhook bot: file attachment image too large (%d bytes) — skipping",
+                        len(b64),
+                    )
+                    continue
+                images.append(f"data:{mime};base64,{b64}")
+                logger.info(
+                    "Teams webhook bot: downloaded file-attachment image (type=%s, %d bytes raw)",
+                    file_type,
+                    len(raw),
+                )
+            except Exception:
+                logger.debug(
+                    "Teams webhook bot: failed to download file-attachment image",
+                    exc_info=True,
+                )
+
+        # --- Case 2: direct image/* attachment with a contentUrl ---
+        elif ctype.startswith("image/"):
+            content_url = getattr(att, "content_url", "") or ""
+            if not content_url:
+                continue
+            try:
+                token = await asyncio.to_thread(get_access_token)
+                async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as http:
+                    resp = await http.get(
+                        content_url, headers={"Authorization": f"Bearer {token}"}
+                    )
+                    resp.raise_for_status()
+                raw = resp.content
+                actual_mime = resp.headers.get("content-type", ctype).split(";")[0].strip()
+                b64 = base64.b64encode(raw).decode("utf-8")
+                if len(b64) > _MAX_IMAGE_BYTES:
+                    logger.warning(
+                        "Teams webhook bot: image attachment too large (%d bytes) — skipping",
+                        len(b64),
+                    )
+                    continue
+                images.append(f"data:{actual_mime};base64,{b64}")
+                logger.info(
+                    "Teams webhook bot: downloaded image/* attachment (%d bytes raw)", len(raw)
+                )
+            except Exception:
+                logger.debug(
+                    "Teams webhook bot: failed to download image attachment from contentUrl",
+                    exc_info=True,
+                )
+
+    return images
 
 
 class TeamsWebhookBot:
@@ -700,12 +829,21 @@ class TeamsWebhookBot:
         sender_user = getattr(from_field, "user", None) if from_field else None
         sender_id = getattr(sender_user, "id", None) if sender_user else None
         if sender_id and sender_id == self._bot_user_id:
+            logger.debug(
+                "Teams webhook bot: skipping message %s — sent by bot itself",
+                message_id,
+            )
             return
 
         # Only process regular chat messages (skip system events, typing, etc.)
         msg_type = getattr(msg, "message_type", None)
         msg_type_val = getattr(msg_type, "value", str(msg_type)) if msg_type else ""
         if msg_type_val != "message":
+            logger.debug(
+                "Teams webhook bot: skipping message %s — type is %r (not 'message')",
+                message_id,
+                msg_type_val,
+            )
             return
 
         body = getattr(msg, "body", None)
@@ -714,19 +852,42 @@ class TeamsWebhookBot:
         content_type_val = (
             getattr(content_type, "value", str(content_type)) if content_type else ""
         )
-        # Extract inline images from hosted contents (pasted screenshots, etc.)
+        logger.debug(
+            "Teams webhook bot: msg %s body content_type=%r len=%d",
+            message_id,
+            content_type_val,
+            len(raw_content),
+        )
+
+        # Extract inline images (pasted screenshots) via the hostedContents list API.
+        # This is more reliable than parsing the HTML body for <img src> URLs because
+        # the exact URL format Teams embeds varies by client and Teams version.
+        # Also fall back to any image-typed entries in msg.attachments.
         images: list[str] = []
-        if content_type_val == "html" and raw_content:
-            hosted_ids = _HOSTED_IMG_RE.findall(raw_content)
-            for hid in hosted_ids[:4]:  # cap at 4 images per message
-                data_url = await _download_graph_image(chat_id, message_id, hid)
-                if data_url:
-                    images.append(data_url)
-                    logger.debug(
-                        "Teams webhook bot: downloaded hosted-content image %s (%d chars)",
-                        hid,
-                        len(data_url),
-                    )
+        attachments = getattr(msg, "attachments", None) or []
+        # Trigger hosted-content download when body has <img> OR <attachment> tags
+        has_img_in_body = bool(raw_content) and (
+            "<img" in raw_content.lower() or "<attachment" in raw_content.lower()
+        )
+        logger.debug(
+            "Teams webhook bot: msg %s has_img_in_body=%s attachments=%d",
+            message_id,
+            has_img_in_body,
+            len(attachments),
+        )
+        if has_img_in_body:
+            images = await _fetch_hosted_content_images(chat_id, message_id)
+        # Fallback: handle uploaded image files (paperclip button) which are NOT
+        # stored as hosted contents but as file attachments with a downloadUrl.
+        if len(images) < 4 and attachments:
+            att_images = await _fetch_attachment_images(attachments)
+            images.extend(att_images[: 4 - len(images)])
+        if images:
+            logger.debug(
+                "Teams webhook bot: msg %s — %d image(s) extracted total",
+                message_id,
+                len(images),
+            )
 
         text = (
             _STRIP_HTML.sub("", raw_content).strip()
@@ -735,6 +896,10 @@ class TeamsWebhookBot:
         )
 
         if not text and not images:
+            logger.debug(
+                "Teams webhook bot: skipping message %s — no text and no images extracted",
+                message_id,
+            )
             return
 
         # Provide a neutral fallback query when the user sends only an image
